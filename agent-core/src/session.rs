@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -268,6 +268,7 @@ pub struct AgentRuntimeState {
     pub session_work_states: Arc<Mutex<HashMap<String, AgentSessionWorkState>>>,
     pub workflows: Arc<Mutex<HashMap<String, AgentWorkflowState>>>,
     pub memory_index: Arc<Mutex<MemoryIndex>>,
+    pub active_turns: Arc<Mutex<HashSet<String>>>,
     persistence_dir: Arc<Mutex<Option<PathBuf>>>,
     persistence_loaded: Arc<Mutex<bool>>,
     telemetry_log_path: Arc<Mutex<Option<PathBuf>>>,
@@ -285,6 +286,7 @@ impl Default for AgentRuntimeState {
             session_work_states: Arc::new(Mutex::new(HashMap::new())),
             workflows: Arc::new(Mutex::new(HashMap::new())),
             memory_index: Arc::new(Mutex::new(MemoryIndex::default())),
+            active_turns: Arc::new(Mutex::new(HashSet::new())),
             persistence_dir: Arc::new(Mutex::new(None)),
             persistence_loaded: Arc::new(Mutex::new(false)),
             telemetry_log_path: Arc::new(Mutex::new(None)),
@@ -511,6 +513,23 @@ impl AgentRuntimeState {
     pub async fn clear_cancellation(&self, tab_id: &str) {
         let mut cancellations = self.cancellations.lock().await;
         cancellations.remove(tab_id);
+    }
+
+    pub async fn acquire_turn_guard(&self, tab_id: &str) -> Result<(), String> {
+        let mut active = self.active_turns.lock().await;
+        if active.contains(tab_id) {
+            return Err(format!(
+                "A turn is already running on tab '{}'. Cancel it or wait for completion.",
+                tab_id
+            ));
+        }
+        active.insert(tab_id.to_string());
+        Ok(())
+    }
+
+    pub async fn release_turn_guard(&self, tab_id: &str) {
+        let mut active = self.active_turns.lock().await;
+        active.remove(tab_id);
     }
 
     pub async fn set_tool_approval(
