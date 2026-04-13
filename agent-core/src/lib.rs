@@ -10,6 +10,9 @@ pub mod streaming;
 pub mod tools;
 pub mod turn_engine;
 pub mod workflows;
+pub mod document_artifacts;
+pub mod review_runtime;
+pub mod telemetry;
 
 pub use config::{
     AgentDomainConfig, AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig,
@@ -55,4 +58,14 @@ pub use message_builder::{
     provider_display_name, provider_supports_required_tool_choice, provider_supports_transport,
     raw_assistant_message, visible_assistant_message, visible_text_message,
     visible_tool_result_message,
+};
+pub use document_artifacts::{
+    artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
+    is_document_resource_path, load_document_artifact, resource_kind_from_path, DocumentArtifact,
+    DocumentArtifactSegment, DocumentEvidenceMatch,
+};
+pub use review_runtime::AgentReviewArtifact;
+pub use telemetry::{
+    document_artifact_miss, document_fallback_used, record_document_question_metrics,
+    record_tool_execution, DocumentQuestionMetricsRecord, ToolExecutionRecord, ToolExecutionTimer,
 };
