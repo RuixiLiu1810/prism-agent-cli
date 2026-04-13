@@ -3,8 +3,10 @@
 pub mod config;
 pub mod events;
 pub mod event_sink;
+pub mod message_builder;
 pub mod provider;
 pub mod session;
+pub mod streaming;
 pub mod tools;
 pub mod turn_engine;
 pub mod workflows;
@@ -41,4 +43,16 @@ pub use session::{
     AgentRuntimeState, AgentSessionRecord, AgentSessionSummary, AgentSessionWorkState,
     CollectedReference, MemoryEntry, MemoryIndex, MemoryType, PendingTurnResume,
     ToolApprovalDecision, ToolApprovalRecord, ToolApprovalState,
+};
+pub use streaming::{
+    extract_function_call_item, extract_response_id, merge_stream_fragment, parse_sse_frame,
+    push_reasoning_delta, sampling_profile_params, take_next_sse_frame,
+    TOOL_ARGUMENTS_RETRY_HINT,
+};
+pub use message_builder::{
+    effective_tool_choice_for_provider, extract_text_blocks_only, extract_text_segments,
+    extract_tool_result_blocks, extract_tool_use_blocks, hidden_chat_message,
+    provider_display_name, provider_supports_required_tool_choice, provider_supports_transport,
+    raw_assistant_message, visible_assistant_message, visible_text_message,
+    visible_tool_result_message,
 };
