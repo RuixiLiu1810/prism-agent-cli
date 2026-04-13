@@ -4,8 +4,10 @@ pub mod config;
 pub mod events;
 pub mod event_sink;
 pub mod provider;
+pub mod session;
 pub mod tools;
 pub mod turn_engine;
+pub mod workflows;
 
 pub use config::{
     AgentDomainConfig, AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig,
@@ -30,4 +32,13 @@ pub use turn_engine::{
     request_has_binary_attachment_context, should_surface_assistant_text,
     tool_result_feedback_for_model, tool_result_has_invalid_arguments_error, tool_result_status,
     ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, TurnBudget, AGENT_CANCELLED_MESSAGE,
+};
+pub use workflows::{
+    AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
+    WorkflowCheckpointTransition, WorkflowStageRecord,
+};
+pub use session::{
+    AgentRuntimeState, AgentSessionRecord, AgentSessionSummary, AgentSessionWorkState,
+    CollectedReference, MemoryEntry, MemoryIndex, MemoryType, PendingTurnResume,
+    ToolApprovalDecision, ToolApprovalRecord, ToolApprovalState,
 };
