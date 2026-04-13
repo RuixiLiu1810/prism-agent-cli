@@ -1,2 +1,12 @@
 // Agent core library — framework-agnostic agent runtime.
-// Modules will be added as code is migrated from the Tauri app.
+
+pub mod config;
+pub mod events;
+pub mod event_sink;
+
+pub use config::{
+    AgentDomainConfig, AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig,
+    ConfigProvider, StaticConfigProvider,
+};
+pub use event_sink::{EventSink, NullEventSink};
+pub use events::*;
