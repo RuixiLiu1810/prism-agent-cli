@@ -1,6 +1,6 @@
-use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
+use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tokio::sync::watch;
 
@@ -8,8 +8,8 @@ use crate::event_sink::EventSink;
 use crate::events::*;
 use crate::provider::AgentTurnDescriptor;
 use crate::tools::{
-    is_reviewable_edit_tool, tool_result_requires_approval, tool_result_review_ready,
-    AgentToolCall, AgentToolResult,
+    AgentToolCall, AgentToolResult, is_reviewable_edit_tool, tool_result_requires_approval,
+    tool_result_review_ready,
 };
 
 // ─── Data Types ─────────────────────────────────────────────────────
@@ -431,7 +431,9 @@ fn truncate_tool_feedback(text: String, tool_name: &str) -> String {
     let recovery_hint = match tool_name {
         "read_file" => " Call read_file with a specific line range to see the rest.",
         "run_shell_command" => " The full output was truncated.",
-        "read_document" | "read_document_excerpt" | "search_document_text"
+        "read_document"
+        | "read_document_excerpt"
+        | "search_document_text"
         | "get_document_evidence" => {
             " Use search_document_text with a more specific query to find relevant sections."
         }
@@ -525,7 +527,10 @@ fn tool_result_feedback_for_model_inner(result: &AgentToolResult) -> String {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if written {
-                format!("Edit applied successfully to {}. Do not verify this edit with shell commands or re-read the file. Summarize the change to the user.", path)
+                format!(
+                    "Edit applied successfully to {}. Do not verify this edit with shell commands or re-read the file. Summarize the change to the user.",
+                    path
+                )
             } else {
                 format!("Reviewable edit prepared for {}.", path)
             }

@@ -45,10 +45,7 @@ pub struct AgentRuntimeConfig {
 pub trait ConfigProvider: Send + Sync {
     /// Load the agent runtime configuration.
     /// `project_root`: optional project directory for project-scoped overrides.
-    fn load_agent_runtime(
-        &self,
-        project_root: Option<&str>,
-    ) -> Result<AgentRuntimeConfig, String>;
+    fn load_agent_runtime(&self, project_root: Option<&str>) -> Result<AgentRuntimeConfig, String>;
 
     /// Resolve the application config directory (for memory, logs, etc.).
     fn app_config_dir(&self) -> Result<PathBuf, String>;

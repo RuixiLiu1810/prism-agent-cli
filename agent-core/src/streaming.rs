@@ -1,6 +1,6 @@
 //! SSE streaming parser and shared HTTP response utilities.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::AgentSamplingProfilesConfig;
 use crate::provider::AgentSamplingProfile;

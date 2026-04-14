@@ -1,6 +1,6 @@
 //! Chat message construction utilities for OpenAI/Anthropic API formats.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::tools::AgentToolCall;
 use crate::turn_engine::should_surface_assistant_text;
@@ -21,7 +21,10 @@ pub fn provider_supports_required_tool_choice(provider: &str) -> bool {
     matches!(provider, "minimax")
 }
 
-pub fn effective_tool_choice_for_provider<'a>(provider: &str, requested: &'a str) -> (&'a str, bool) {
+pub fn effective_tool_choice_for_provider<'a>(
+    provider: &str,
+    requested: &'a str,
+) -> (&'a str, bool) {
     if requested == "required" && !provider_supports_required_tool_choice(provider) {
         ("auto", true)
     } else {

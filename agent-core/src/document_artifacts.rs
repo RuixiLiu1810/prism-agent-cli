@@ -279,8 +279,8 @@ pub fn format_document_matches_preview(
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
-        load_document_artifact, DocumentArtifact, DocumentArtifactSegment,
+        DocumentArtifact, DocumentArtifactSegment, artifact_path_for,
+        find_relevant_document_matches, format_document_matches_preview, load_document_artifact,
     };
     use serde_json::json;
     use tempfile::tempdir;

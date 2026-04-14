@@ -1,56 +1,34 @@
 // Agent core library — framework-agnostic agent runtime.
 
 pub mod config;
-pub mod events;
+pub mod document_artifacts;
 pub mod event_sink;
+pub mod events;
+pub mod instructions;
 pub mod message_builder;
 pub mod provider;
+pub mod review_runtime;
 pub mod session;
 pub mod streaming;
+pub mod telemetry;
 pub mod tools;
 pub mod turn_engine;
 pub mod workflows;
-pub mod document_artifacts;
-pub mod review_runtime;
-pub mod telemetry;
 
 pub use config::{
     AgentDomainConfig, AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig,
     ConfigProvider, StaticConfigProvider,
 };
+pub use document_artifacts::{
+    DocumentArtifact, DocumentArtifactSegment, DocumentEvidenceMatch, artifact_path_for,
+    find_relevant_document_matches, format_document_matches_preview, is_document_resource_path,
+    load_document_artifact, resource_kind_from_path,
+};
 pub use event_sink::{EventSink, NullEventSink};
 pub use events::*;
-pub use provider::{
-    AgentProvider, AgentResponseMode, AgentSamplingProfile, AgentSelectionScope, AgentStatus,
-    AgentTaskKind, AgentTurnDescriptor, AgentTurnHandle, AgentTurnProfile,
-};
-pub use tools::{
-    AgentToolCall, AgentToolContract, AgentToolResult, AgentToolResultDisplayContent,
-    AgentToolSpec, ToolApprovalPolicy, ToolCapabilityClass, ToolExecutionPolicyContext,
-    ToolResourceScope, ToolResultShape, ToolReviewPolicy, ToolSuspendBehavior,
-};
-pub use turn_engine::{
-    compact_chat_messages, emit_agent_complete, emit_approval_requested, emit_error, emit_status,
-    emit_text_delta, emit_tool_call, emit_tool_interrupt_state, emit_tool_result,
-    emit_tool_resumed, emit_turn_resumed, emit_workflow_checkpoint_approved,
-    emit_workflow_checkpoint_rejected, emit_workflow_checkpoint_requested, estimate_tokens,
-    request_has_binary_attachment_context, should_surface_assistant_text,
-    tool_result_feedback_for_model, tool_result_has_invalid_arguments_error, tool_result_status,
-    ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, TurnBudget, AGENT_CANCELLED_MESSAGE,
-};
-pub use workflows::{
-    AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
-    WorkflowCheckpointTransition, WorkflowStageRecord,
-};
-pub use session::{
-    AgentRuntimeState, AgentSessionRecord, AgentSessionSummary, AgentSessionWorkState,
-    CollectedReference, MemoryEntry, MemoryIndex, MemoryType, PendingTurnResume,
-    ToolApprovalDecision, ToolApprovalRecord, ToolApprovalState,
-};
-pub use streaming::{
-    extract_function_call_item, extract_response_id, merge_stream_fragment, parse_sse_frame,
-    push_reasoning_delta, sampling_profile_params, take_next_sse_frame,
-    TOOL_ARGUMENTS_RETRY_HINT,
+pub use instructions::{
+    build_agent_instructions_with_work_state, max_rounds_for_task, resolve_turn_profile,
+    summarize_objective, tool_choice_for_task,
 };
 pub use message_builder::{
     effective_tool_choice_for_provider, extract_text_blocks_only, extract_text_segments,
@@ -59,13 +37,41 @@ pub use message_builder::{
     raw_assistant_message, visible_assistant_message, visible_text_message,
     visible_tool_result_message,
 };
-pub use document_artifacts::{
-    artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
-    is_document_resource_path, load_document_artifact, resource_kind_from_path, DocumentArtifact,
-    DocumentArtifactSegment, DocumentEvidenceMatch,
+pub use provider::{
+    AgentProvider, AgentResponseMode, AgentSamplingProfile, AgentSelectionScope, AgentStatus,
+    AgentTaskKind, AgentTurnDescriptor, AgentTurnHandle, AgentTurnProfile,
 };
 pub use review_runtime::AgentReviewArtifact;
+pub use session::{
+    AgentRuntimeState, AgentSessionRecord, AgentSessionSummary, AgentSessionWorkState,
+    CollectedReference, MemoryEntry, MemoryIndex, MemoryType, PendingTurnResume,
+    ToolApprovalDecision, ToolApprovalRecord, ToolApprovalState,
+};
+pub use streaming::{
+    TOOL_ARGUMENTS_RETRY_HINT, extract_function_call_item, extract_response_id,
+    merge_stream_fragment, parse_sse_frame, push_reasoning_delta, sampling_profile_params,
+    take_next_sse_frame,
+};
 pub use telemetry::{
-    document_artifact_miss, document_fallback_used, record_document_question_metrics,
-    record_tool_execution, DocumentQuestionMetricsRecord, ToolExecutionRecord, ToolExecutionTimer,
+    DocumentQuestionMetricsRecord, ToolExecutionRecord, ToolExecutionTimer, document_artifact_miss,
+    document_fallback_used, record_document_question_metrics, record_tool_execution,
+};
+pub use tools::{
+    AgentToolCall, AgentToolContract, AgentToolResult, AgentToolResultDisplayContent,
+    AgentToolSpec, ToolApprovalPolicy, ToolCapabilityClass, ToolExecutionPolicyContext,
+    ToolResourceScope, ToolResultShape, ToolReviewPolicy, ToolSuspendBehavior, default_tool_specs,
+    parse_tool_arguments, to_chat_completions_tool_schema, to_openai_tool_schema,
+};
+pub use turn_engine::{
+    AGENT_CANCELLED_MESSAGE, ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, TurnBudget,
+    compact_chat_messages, emit_agent_complete, emit_approval_requested, emit_error, emit_status,
+    emit_text_delta, emit_tool_call, emit_tool_interrupt_state, emit_tool_result,
+    emit_tool_resumed, emit_turn_resumed, emit_workflow_checkpoint_approved,
+    emit_workflow_checkpoint_rejected, emit_workflow_checkpoint_requested, estimate_tokens,
+    request_has_binary_attachment_context, should_surface_assistant_text,
+    tool_result_feedback_for_model, tool_result_has_invalid_arguments_error, tool_result_status,
+};
+pub use workflows::{
+    AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
+    WorkflowCheckpointTransition, WorkflowStageRecord,
 };
