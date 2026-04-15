@@ -4,6 +4,7 @@ mod peer_review;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub use literature_review::LiteratureReviewStage;
@@ -36,11 +37,23 @@ pub enum WorkflowCheckpointDecision {
 }
 
 impl WorkflowCheckpointDecision {
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "Keep the associated parsing entrypoint stable for desktop call sites outside this write scope"
+    )]
     pub fn from_str(value: &str) -> Option<Self> {
+        value.parse().ok()
+    }
+}
+
+impl FromStr for WorkflowCheckpointDecision {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "approve" | "approve_stage" => Some(Self::ApproveStage),
-            "reject" | "request_changes" | "request_change" => Some(Self::RequestChanges),
-            _ => None,
+            "approve" | "approve_stage" => Ok(Self::ApproveStage),
+            "reject" | "request_changes" | "request_change" => Ok(Self::RequestChanges),
+            _ => Err(()),
         }
     }
 }

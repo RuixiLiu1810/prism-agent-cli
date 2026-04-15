@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
 use crate::provider::AgentTurnProfile;
@@ -82,7 +82,6 @@ pub struct AgentSessionRecord {
 }
 
 impl AgentSessionRecord {
-    #[allow(dead_code)]
     pub fn new(
         provider: &str,
         project_path: String,
@@ -105,7 +104,6 @@ impl AgentSessionRecord {
         }
     }
 
-    #[allow(dead_code)]
     pub fn touch_response(&mut self, response_id: Option<String>) {
         self.previous_response_id = self.last_response_id.clone();
         self.last_response_id = response_id;
@@ -161,10 +159,21 @@ pub struct ToolApprovalState {
     pub allow_session: bool,
     pub deny_session: bool,
     pub allow_once_remaining: u32,
-    #[allow(dead_code)]
     pub source: Option<String>,
-    #[allow(dead_code)]
     pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CollectedReferenceSelector {
+    doi: Option<String>,
+    pmid: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CollectedReferenceMetadataUpdate {
+    user_notes: Option<String>,
+    relevance_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -850,6 +859,10 @@ impl AgentRuntimeState {
         state.collected_references
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the public update API stable for downstream desktop callers outside this write scope"
+    )]
     pub async fn update_collected_reference(
         &self,
         tab_id: &str,
@@ -860,9 +873,29 @@ impl AgentRuntimeState {
         user_notes: Option<String>,
         relevance_tag: Option<String>,
     ) -> Result<(), String> {
-        let doi = normalize_reference_id(doi.as_deref());
-        let pmid = normalize_reference_id(pmid.as_deref());
-        let title = title
+        self.update_collected_reference_with(
+            tab_id,
+            local_session_id,
+            CollectedReferenceSelector { doi, pmid, title },
+            CollectedReferenceMetadataUpdate {
+                user_notes,
+                relevance_tag,
+            },
+        )
+        .await
+    }
+
+    async fn update_collected_reference_with(
+        &self,
+        tab_id: &str,
+        local_session_id: Option<&str>,
+        selector: CollectedReferenceSelector,
+        metadata: CollectedReferenceMetadataUpdate,
+    ) -> Result<(), String> {
+        let doi = normalize_reference_id(selector.doi.as_deref());
+        let pmid = normalize_reference_id(selector.pmid.as_deref());
+        let title = selector
+            .title
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -873,12 +906,13 @@ impl AgentRuntimeState {
             );
         }
 
-        let normalized_notes = user_notes
+        let normalized_notes = metadata
+            .user_notes
             .as_deref()
             .map(str::trim)
             .map(|value| value.to_string())
             .filter(|value| !value.is_empty());
-        let normalized_tag = normalize_relevance_tag(relevance_tag.as_deref())?;
+        let normalized_tag = normalize_relevance_tag(metadata.relevance_tag.as_deref())?;
 
         let mut updated = false;
         self.update_work_state(tab_id, local_session_id, |state| {
@@ -1583,12 +1617,11 @@ fn cleanup_expired_pending_turns(pending_turns: &mut HashMap<String, PendingTurn
     before != pending_turns.len()
 }
 
-async fn load_memory_index(memory_dir: &PathBuf) -> MemoryIndex {
+async fn load_memory_index(memory_dir: &Path) -> MemoryIndex {
     let index_path = memory_dir.join(MEMORY_INDEX_FILE);
-    match read_json_file::<MemoryIndex>(&index_path).await {
-        Ok(index) => index,
-        Err(_) => MemoryIndex::default(),
-    }
+    read_json_file::<MemoryIndex>(&index_path)
+        .await
+        .unwrap_or_default()
 }
 
 fn estimate_memory_tokens(text: &str) -> usize {
@@ -1612,7 +1645,7 @@ fn is_cjk_char(c: char) -> bool {
         || ('\u{20000}'..='\u{2A6DF}').contains(&c)
 }
 
-async fn read_json_file<T>(path: &PathBuf) -> Result<T, String>
+async fn read_json_file<T>(path: &Path) -> Result<T, String>
 where
     T: Default + for<'de> Deserialize<'de>,
 {
@@ -1624,7 +1657,7 @@ where
     }
 }
 
-async fn write_json_file<T>(path: &PathBuf, value: &T) -> Result<(), String>
+async fn write_json_file<T>(path: &Path, value: &T) -> Result<(), String>
 where
     T: Serialize,
 {

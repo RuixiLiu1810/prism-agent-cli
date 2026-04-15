@@ -1,6 +1,6 @@
 //! Chat message construction utilities for OpenAI/Anthropic API formats.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::tools::AgentToolCall;
 use crate::turn_engine::should_surface_assistant_text;
@@ -225,4 +225,20 @@ pub fn raw_assistant_message(
         message["reasoning_details"] = Value::Array(reasoning_details.to_vec());
     }
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_tool_choice_for_provider;
+
+    #[test]
+    fn deepseek_downgrades_required_tool_choice_to_auto() {
+        let (choice, downgraded) = effective_tool_choice_for_provider("deepseek", "required");
+        assert_eq!(choice, "auto");
+        assert!(downgraded);
+
+        let (choice, downgraded) = effective_tool_choice_for_provider("minimax", "required");
+        assert_eq!(choice, "required");
+        assert!(!downgraded);
+    }
 }

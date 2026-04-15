@@ -157,3 +157,22 @@ pub struct AgentCompletePayload {
     pub tab_id: String,
     pub outcome: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentEventPayload, AgentStatusEvent};
+
+    #[test]
+    fn status_payload_serializes_with_status_tag() {
+        let payload = AgentEventPayload::Status(AgentStatusEvent {
+            stage: "thinking".to_string(),
+            message: "Planning next step".to_string(),
+        });
+
+        let value = serde_json::to_value(&payload).expect("payload should serialize");
+
+        assert_eq!(value["type"], "status");
+        assert_eq!(value["stage"], "thinking");
+        assert_eq!(value["message"], "Planning next step");
+    }
+}

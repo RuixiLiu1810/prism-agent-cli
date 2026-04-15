@@ -43,6 +43,16 @@ pub struct DocumentQuestionMetricsRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct DocumentQuestionMetrics {
+    pub outcome: String,
+    pub doc_tool_rounds: u32,
+    pub doc_tool_calls: u32,
+    pub artifact_miss_count: u32,
+    pub fallback_count: u32,
+    pub end_to_end_latency: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub struct ToolExecutionTimer {
     started_at: Instant,
 }
@@ -148,6 +158,10 @@ pub fn document_fallback_used(result: &AgentToolResult) -> bool {
         .unwrap_or(false)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the public telemetry helper stable for existing provider call sites outside this write scope"
+)]
 pub async fn record_document_question_metrics(
     runtime_state: &AgentRuntimeState,
     request: &AgentTurnDescriptor,
@@ -158,10 +172,30 @@ pub async fn record_document_question_metrics(
     fallback_count: u32,
     end_to_end_latency: Duration,
 ) {
-    let (artifact_miss_rate, fallback_rate) = if doc_tool_calls > 0 {
+    record_document_question_metrics_entry(
+        runtime_state,
+        request,
+        &DocumentQuestionMetrics {
+            outcome: outcome.to_string(),
+            doc_tool_rounds,
+            doc_tool_calls,
+            artifact_miss_count,
+            fallback_count,
+            end_to_end_latency,
+        },
+    )
+    .await;
+}
+
+pub async fn record_document_question_metrics_entry(
+    runtime_state: &AgentRuntimeState,
+    request: &AgentTurnDescriptor,
+    metrics: &DocumentQuestionMetrics,
+) {
+    let (artifact_miss_rate, fallback_rate) = if metrics.doc_tool_calls > 0 {
         (
-            artifact_miss_count as f64 / doc_tool_calls as f64,
-            fallback_count as f64 / doc_tool_calls as f64,
+            metrics.artifact_miss_count as f64 / metrics.doc_tool_calls as f64,
+            metrics.fallback_count as f64 / metrics.doc_tool_calls as f64,
         )
     } else {
         (0.0, 0.0)
@@ -173,14 +207,14 @@ pub async fn record_document_question_metrics(
         tab_id: request.tab_id.clone(),
         local_session_id: request.local_session_id.clone(),
         project_path: request.project_path.clone(),
-        outcome: outcome.to_string(),
-        doc_tool_rounds,
-        doc_tool_calls,
-        artifact_miss_count,
+        outcome: metrics.outcome.clone(),
+        doc_tool_rounds: metrics.doc_tool_rounds,
+        doc_tool_calls: metrics.doc_tool_calls,
+        artifact_miss_count: metrics.artifact_miss_count,
         artifact_miss_rate,
-        fallback_count,
+        fallback_count: metrics.fallback_count,
         fallback_rate,
-        end_to_end_latency_ms: end_to_end_latency.as_millis() as u64,
+        end_to_end_latency_ms: metrics.end_to_end_latency.as_millis() as u64,
     };
 
     append_telemetry_record(runtime_state, &record).await;

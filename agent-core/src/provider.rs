@@ -81,7 +81,6 @@ pub struct AgentTurnDescriptor {
     pub turn_profile: Option<AgentTurnProfile>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTurnHandle {
@@ -90,7 +89,6 @@ pub struct AgentTurnHandle {
     pub response_id: Option<String>,
 }
 
-#[allow(dead_code)]
 pub trait AgentProvider: Send + Sync {
     fn provider_id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;

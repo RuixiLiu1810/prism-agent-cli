@@ -1,6 +1,6 @@
 //! SSE streaming parser and shared HTTP response utilities.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::config::AgentSamplingProfilesConfig;
 use crate::provider::AgentSamplingProfile;
@@ -155,8 +155,8 @@ pub fn merge_stream_fragment(existing: &str, incoming: &str) -> String {
     if existing.is_empty() {
         return incoming.to_string();
     }
-    if incoming.starts_with(existing) {
-        return incoming[existing.len()..].to_string();
+    if let Some(stripped) = incoming.strip_prefix(existing) {
+        return stripped.to_string();
     }
     incoming.to_string()
 }
@@ -174,9 +174,21 @@ pub fn push_reasoning_delta(reasoning_details: &mut Vec<Value>, delta: &Value) {
         let Some(item_obj) = item.as_object() else {
             continue;
         };
-        let target = reasoning_details[index]
-            .as_object_mut()
-            .expect("reasoning detail should stay object");
+        let Some(target) = reasoning_details[index].as_object_mut() else {
+            reasoning_details[index] = json!({});
+            let Some(target) = reasoning_details[index].as_object_mut() else {
+                continue;
+            };
+            for (key, value) in item_obj {
+                if key == "text" {
+                    let incoming = value.as_str().unwrap_or_default();
+                    target.insert("text".to_string(), Value::String(incoming.to_string()));
+                } else {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            continue;
+        };
 
         for (key, value) in item_obj {
             if key == "text" {
@@ -196,5 +208,23 @@ pub fn push_reasoning_delta(reasoning_details: &mut Vec<Value>, delta: &Value) {
                 target.insert(key.clone(), value.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_next_sse_frame;
+
+    #[test]
+    fn take_next_sse_frame_handles_crlf_separator() {
+        let mut buffer = String::from(
+            "event: response.output_text.delta\r\ndata: {\"delta\":\"hello\"}\r\n\r\nevent: done\r\ndata: [DONE]\r\n\r\n",
+        );
+
+        let frame = take_next_sse_frame(&mut buffer).expect("first frame should parse");
+
+        assert_eq!(frame.0, "response.output_text.delta");
+        assert_eq!(frame.1, "{\"delta\":\"hello\"}");
+        assert_eq!(buffer, "event: done\r\ndata: [DONE]\r\n\r\n");
     }
 }
