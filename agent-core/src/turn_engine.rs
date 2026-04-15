@@ -1,15 +1,23 @@
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use futures::future::join_all;
+use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::event_sink::EventSink;
 use crate::events::*;
+use crate::instructions::resolve_turn_profile;
 use crate::provider::AgentTurnDescriptor;
+use crate::session::{AgentRuntimeState, PendingTurnResume};
+use crate::telemetry::{record_tool_execution, ToolExecutionTimer};
 use crate::tools::{
-    AgentToolCall, AgentToolResult, is_reviewable_edit_tool, tool_result_requires_approval,
-    tool_result_review_ready,
+    check_tool_call_policy, is_document_tool_name, is_parallel_safe_tool, is_reviewable_edit_tool,
+    summarize_tool_target, tool_result_display_value, tool_result_requires_approval,
+    tool_result_review_ready, AgentToolCall, AgentToolResult, ToolExecutionPolicyContext,
 };
 
 // ─── Data Types ─────────────────────────────────────────────────────
@@ -23,6 +31,22 @@ pub struct ExecutedToolCall {
 pub struct ExecutedToolBatch {
     pub executed: Vec<ExecutedToolCall>,
     pub suspended: bool,
+}
+
+pub type ToolExecutorFn = Arc<
+    dyn Fn(
+            AgentToolCall,
+            Option<watch::Receiver<bool>>,
+        ) -> Pin<Box<dyn Future<Output = AgentToolResult> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Debug, Clone)]
+struct PreparedToolCall {
+    call: AgentToolCall,
+    target: Option<String>,
+    timer: ToolExecutionTimer,
 }
 
 // ─── Turn Budget ────────────────────────────────────────────────────
@@ -99,6 +123,353 @@ impl TurnBudget {
             }
         }
         Ok(())
+    }
+}
+
+async fn prepare_tool_call(
+    sink: &dyn EventSink,
+    runtime_state: &AgentRuntimeState,
+    request: &AgentTurnDescriptor,
+    call: AgentToolCall,
+) -> PreparedToolCall {
+    let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| json!({}));
+    let target = summarize_tool_target(&input);
+    runtime_state
+        .record_tool_running(
+            &request.tab_id,
+            request.local_session_id.as_deref(),
+            &call.tool_name,
+            target.as_deref(),
+        )
+        .await;
+    if is_document_tool_name(&call.tool_name) {
+        let target_label = target
+            .as_deref()
+            .map(|value| format!(" for {}", value))
+            .unwrap_or_default();
+        emit_status(
+            sink,
+            &request.tab_id,
+            "document_read_started",
+            &format!("Reading document{}...", target_label),
+        );
+    } else {
+        emit_status(
+            sink,
+            &request.tab_id,
+            "tool_running",
+            &format!("Running {}...", call.tool_name),
+        );
+    }
+    emit_tool_call(
+        sink,
+        &request.tab_id,
+        &call.tool_name,
+        &call.call_id,
+        input.clone(),
+    );
+
+    PreparedToolCall {
+        call,
+        target,
+        timer: ToolExecutionTimer::start(),
+    }
+}
+
+async fn execute_prepared_tool_call(
+    request: &AgentTurnDescriptor,
+    resolved_profile: &crate::provider::AgentTurnProfile,
+    prepared: PreparedToolCall,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    tool_executor: ToolExecutorFn,
+) -> (PreparedToolCall, AgentToolResult) {
+    let policy_context = ToolExecutionPolicyContext {
+        task_kind: resolved_profile.task_kind.clone(),
+        has_binary_attachment_context: request_has_binary_attachment_context(request),
+    };
+    let result = if let Some(blocked) =
+        check_tool_call_policy(policy_context, &prepared.call, prepared.target.as_deref())
+    {
+        blocked
+    } else {
+        tool_executor(prepared.call.clone(), cancel_rx).await
+    };
+
+    (prepared, result)
+}
+
+async fn handle_tool_result(
+    sink: &dyn EventSink,
+    runtime_state: &AgentRuntimeState,
+    request: &AgentTurnDescriptor,
+    prepared: PreparedToolCall,
+    result: AgentToolResult,
+) -> ExecutedToolCall {
+    let result_target = summarize_tool_target(&result.content).or(prepared.target.clone());
+    let display = tool_result_display_value(&result);
+    runtime_state
+        .record_tool_result(
+            &request.tab_id,
+            request.local_session_id.as_deref(),
+            &result.tool_name,
+            result_target.as_deref(),
+            result.is_error,
+        )
+        .await;
+    runtime_state
+        .record_collected_references_from_tool_result(
+            &request.tab_id,
+            request.local_session_id.as_deref(),
+            &result.tool_name,
+            &result.content,
+        )
+        .await;
+    runtime_state
+        .record_academic_artifacts_from_tool_result(
+            &request.tab_id,
+            request.local_session_id.as_deref(),
+            &result.tool_name,
+            &result.content,
+        )
+        .await;
+
+    emit_tool_result(
+        sink,
+        &request.tab_id,
+        &result.tool_name,
+        &result.call_id,
+        result.is_error,
+        result.preview.clone(),
+        result.content.clone(),
+        display,
+    );
+    let approval_required = tool_result_requires_approval(&result);
+    let review_ready = tool_result_review_ready(&result);
+    emit_review_artifact_ready(
+        sink,
+        &request.tab_id,
+        &result.tool_name,
+        &result.call_id,
+        &result.content,
+    );
+    emit_approval_requested(
+        sink,
+        &request.tab_id,
+        &result.tool_name,
+        &result.call_id,
+        &result.content,
+    );
+    if approval_required {
+        let approval_tool_name = result
+            .content
+            .get("approvalToolName")
+            .and_then(Value::as_str)
+            .unwrap_or(&result.tool_name);
+        let interrupt_message = result
+            .content
+            .get("reason")
+            .and_then(Value::as_str)
+            .or_else(|| result.content.get("summary").and_then(Value::as_str))
+            .unwrap_or("Tool approval is required.");
+        emit_tool_interrupt_state(
+            sink,
+            &request.tab_id,
+            if review_ready {
+                AgentToolInterruptPhase::ReviewReady
+            } else {
+                AgentToolInterruptPhase::AwaitingApproval
+            },
+            Some(&result.tool_name),
+            Some(&result.call_id),
+            result_target.as_deref(),
+            Some(approval_tool_name),
+            review_ready,
+            true,
+            interrupt_message,
+        );
+    }
+    if approval_required {
+        runtime_state
+            .mark_pending_state(
+                &request.tab_id,
+                request.local_session_id.as_deref(),
+                if review_ready { "review" } else { "approval" },
+                &result.tool_name,
+                result_target.as_deref(),
+            )
+            .await;
+        let approval_tool_name = result
+            .content
+            .get("approvalToolName")
+            .and_then(Value::as_str)
+            .unwrap_or(&result.tool_name);
+        let action_label = if is_reviewable_edit_tool(approval_tool_name) {
+            format!(
+                "apply the pending edit{}",
+                result_target
+                    .as_deref()
+                    .map(|target| format!(" for {}", target))
+                    .unwrap_or_default()
+            )
+        } else if approval_tool_name == "run_shell_command" {
+            format!(
+                "run the pending command{}",
+                result_target
+                    .as_deref()
+                    .map(|target| format!(" on {}", target))
+                    .unwrap_or_default()
+            )
+        } else {
+            format!("continue the pending {} action", approval_tool_name)
+        };
+        let continuation_prompt = format!(
+            "A required approval for {} has now been granted. Resume the suspended task in the current session context. Continue from the blocked tool stage instead of restarting from scratch. Use the minimal next tool action needed.",
+            action_label
+        );
+        runtime_state
+            .store_pending_turn(PendingTurnResume {
+                project_path: request.project_path.clone(),
+                tab_id: request.tab_id.clone(),
+                local_session_id: request.local_session_id.clone(),
+                model: request.model.clone(),
+                turn_profile: request.turn_profile.clone(),
+                approval_tool_name: approval_tool_name.to_string(),
+                target_label: result_target.clone(),
+                continuation_prompt,
+                created_at: String::new(),
+                expires_at: String::new(),
+            })
+            .await;
+    } else if is_reviewable_edit_tool(&result.tool_name) || result.tool_name == "run_shell_command"
+    {
+        runtime_state
+            .clear_pending_turn(&request.tab_id, request.local_session_id.as_deref())
+            .await;
+    }
+
+    if is_document_tool_name(&result.tool_name) {
+        let target_label = result_target
+            .as_deref()
+            .map(|value| format!(" for {}", value))
+            .unwrap_or_default();
+        if result.is_error {
+            let reason = result
+                .content
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("document read failed");
+            emit_status(
+                sink,
+                &request.tab_id,
+                "document_read_failed",
+                &format!("Document read failed{}: {}", target_label, reason),
+            );
+        } else {
+            emit_status(
+                sink,
+                &request.tab_id,
+                "document_read_ready",
+                &format!("Document read ready{}.", target_label),
+            );
+        }
+    } else {
+        let (stage, message) = tool_result_status(&result.tool_name, &result.content);
+        emit_status(sink, &request.tab_id, stage, &message);
+    }
+    record_tool_execution(
+        runtime_state,
+        request,
+        &result,
+        result_target,
+        prepared.timer.elapsed(),
+    )
+    .await;
+
+    ExecutedToolCall { result }
+}
+
+pub async fn execute_tool_calls(
+    sink: &dyn EventSink,
+    runtime_state: &AgentRuntimeState,
+    request: &AgentTurnDescriptor,
+    tool_calls: Vec<AgentToolCall>,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    tool_executor: ToolExecutorFn,
+) -> ExecutedToolBatch {
+    let mut executed = Vec::with_capacity(tool_calls.len());
+    let resolved_profile = resolve_turn_profile(request);
+    let mut index = 0usize;
+    let mut suspended = false;
+
+    while index < tool_calls.len() {
+        let parallel_batch = is_parallel_safe_tool(&tool_calls[index].tool_name);
+        let mut batch = vec![tool_calls[index].clone()];
+        index += 1;
+
+        while parallel_batch
+            && index < tool_calls.len()
+            && is_parallel_safe_tool(&tool_calls[index].tool_name)
+        {
+            batch.push(tool_calls[index].clone());
+            index += 1;
+        }
+
+        let mut prepared_calls = Vec::with_capacity(batch.len());
+        for call in batch {
+            prepared_calls.push(prepare_tool_call(sink, runtime_state, request, call).await);
+        }
+
+        let batch_results = if parallel_batch && prepared_calls.len() > 1 {
+            join_all(prepared_calls.into_iter().map(|prepared| {
+                execute_prepared_tool_call(
+                    request,
+                    &resolved_profile,
+                    prepared,
+                    cancel_rx.clone(),
+                    Arc::clone(&tool_executor),
+                )
+            }))
+            .await
+        } else {
+            let mut results = Vec::new();
+            for prepared in prepared_calls {
+                results.push(
+                    execute_prepared_tool_call(
+                        request,
+                        &resolved_profile,
+                        prepared,
+                        cancel_rx.clone(),
+                        Arc::clone(&tool_executor),
+                    )
+                    .await,
+                );
+            }
+            results
+        };
+
+        for (prepared, result) in batch_results {
+            let approval_required = tool_result_requires_approval(&result);
+            if parallel_batch {
+                debug_assert!(
+                    !approval_required,
+                    "parallel-safe tool batches must not yield approval-required results"
+                );
+            }
+            executed.push(handle_tool_result(sink, runtime_state, request, prepared, result).await);
+            if approval_required {
+                suspended = true;
+                break;
+            }
+        }
+
+        if suspended {
+            break;
+        }
+    }
+
+    ExecutedToolBatch {
+        executed,
+        suspended,
     }
 }
 
@@ -217,7 +588,7 @@ impl ToolCallTracker {
 
     pub fn build_injection(&mut self, round_idx: u32) -> Option<String> {
         let has_warnings = !self.pending_warnings.is_empty();
-        let should_checkpoint = (round_idx + 1) % 4 == 0 || has_warnings;
+        let should_checkpoint = (round_idx + 1).is_multiple_of(4) || has_warnings;
         if !should_checkpoint {
             self.pending_warnings.clear();
             return None;
@@ -263,7 +634,7 @@ fn estimate_message_tokens(msg: &Value) -> u32 {
     let content_tokens = msg
         .get("content")
         .and_then(Value::as_str)
-        .map(|s| estimate_tokens(s))
+        .map(estimate_tokens)
         .unwrap_or(0);
     let tool_calls_tokens = msg
         .get("tool_calls")
@@ -276,13 +647,13 @@ fn estimate_message_tokens(msg: &Value) -> u32 {
                         .get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(Value::as_str)
-                        .map(|s| estimate_tokens(s))
+                        .map(estimate_tokens)
                         .unwrap_or(0);
                     let args_tokens = call
                         .get("function")
                         .and_then(|f| f.get("arguments"))
                         .and_then(Value::as_str)
-                        .map(|s| estimate_tokens(s))
+                        .map(estimate_tokens)
                         .unwrap_or(0);
                     name_tokens + args_tokens + 4
                 })
@@ -293,7 +664,7 @@ fn estimate_message_tokens(msg: &Value) -> u32 {
 }
 
 pub fn estimate_messages_tokens(messages: &[Value]) -> u32 {
-    messages.iter().map(|m| estimate_message_tokens(m)).sum()
+    messages.iter().map(estimate_message_tokens).sum()
 }
 
 pub fn compact_chat_messages(messages: &mut Vec<Value>) {
@@ -303,11 +674,8 @@ pub fn compact_chat_messages(messages: &mut Vec<Value>) {
     }
 
     let mut segment_starts: Vec<usize> = vec![1];
-    for i in 2..messages.len() {
-        let role = messages[i]
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+    for (i, message) in messages.iter().enumerate().skip(2) {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         if role != "tool" {
             segment_starts.push(i);
         }
@@ -330,7 +698,7 @@ pub fn compact_chat_messages(messages: &mut Vec<Value>) {
         };
         let seg_tokens: u32 = messages[seg_start..seg_end]
             .iter()
-            .map(|m| estimate_message_tokens(m))
+            .map(estimate_message_tokens)
             .sum();
         if tail_tokens + seg_tokens > available {
             break;
@@ -958,6 +1326,7 @@ pub fn emit_tool_call(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_tool_result(
     sink: &dyn EventSink,
     tab_id: &str,
@@ -1098,6 +1467,7 @@ pub fn emit_workflow_checkpoint_rejected(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_tool_interrupt_state(
     sink: &dyn EventSink,
     tab_id: &str,
@@ -1224,6 +1594,13 @@ pub fn emit_agent_complete(sink: &dyn EventSink, tab_id: &str, outcome: &str) {
 mod tests {
     use super::*;
     use crate::event_sink::test_util::VecEventSink;
+    use crate::provider::AgentTurnDescriptor;
+    use crate::session::AgentRuntimeState;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::sync::watch;
 
     #[test]
     fn estimate_tokens_ascii() {
@@ -1323,5 +1700,96 @@ mod tests {
             arguments: "{}".to_string(),
         }];
         assert!(should_surface_assistant_text("Some text", &calls));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_calls_suspends_after_first_approval_required_result() {
+        let sink = VecEventSink::new();
+        let runtime_state = AgentRuntimeState::default();
+        let request = AgentTurnDescriptor {
+            project_path: "/tmp/project".to_string(),
+            prompt: "Make the requested changes.".to_string(),
+            tab_id: "tab-1".to_string(),
+            model: Some("test-model".to_string()),
+            local_session_id: Some("session-1".to_string()),
+            previous_response_id: None,
+            turn_profile: None,
+        };
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let executor_count = Arc::clone(&call_count);
+        let tool_executor: ToolExecutorFn = Arc::new(move |call, _cancel_rx| {
+            let executor_count = Arc::clone(&executor_count);
+            Box::pin(async move {
+                executor_count.fetch_add(1, Ordering::SeqCst);
+                if call.call_id == "call-1" {
+                    AgentToolResult {
+                        tool_name: call.tool_name,
+                        call_id: call.call_id,
+                        is_error: false,
+                        preview: "approval required".to_string(),
+                        content: json!({
+                            "path": "src/main.rs",
+                            "approvalRequired": true,
+                            "reviewArtifact": true,
+                            "summary": "Pending edit"
+                        }),
+                    }
+                } else {
+                    AgentToolResult {
+                        tool_name: call.tool_name,
+                        call_id: call.call_id,
+                        is_error: false,
+                        preview: "ok".to_string(),
+                        content: json!({
+                            "path": "src/lib.rs",
+                            "written": true
+                        }),
+                    }
+                }
+            })
+        });
+
+        let batch = execute_tool_calls(
+            &sink,
+            &runtime_state,
+            &request,
+            vec![
+                AgentToolCall {
+                    tool_name: "write_file".to_string(),
+                    call_id: "call-1".to_string(),
+                    arguments: r#"{"path":"src/main.rs"}"#.to_string(),
+                },
+                AgentToolCall {
+                    tool_name: "read_file".to_string(),
+                    call_id: "call-2".to_string(),
+                    arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+                },
+            ],
+            Some(watch::channel(false).1),
+            tool_executor,
+        )
+        .await;
+
+        assert!(batch.suspended);
+        assert_eq!(batch.executed.len(), 1);
+        assert_eq!(batch.executed[0].result.call_id, "call-1");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        let pending = runtime_state.take_pending_turn("tab-1").await;
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.approval_tool_name, "write_file");
+        assert_eq!(pending.target_label.as_deref(), Some("src/main.rs"));
+
+        let events = sink.events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            AgentEventPayload::ApprovalRequested(approval)
+                if approval.call_id == "call-1" && approval.review_ready
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            &event.payload,
+            AgentEventPayload::ToolResult(result) if result.call_id == "call-2"
+        )));
     }
 }
