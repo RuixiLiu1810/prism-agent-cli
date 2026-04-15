@@ -7,6 +7,7 @@ pub mod events;
 pub mod instructions;
 pub mod message_builder;
 pub mod provider;
+pub mod providers;
 pub mod review_runtime;
 pub mod session;
 pub mod streaming;
@@ -20,9 +21,9 @@ pub use config::{
     ConfigProvider, StaticConfigProvider,
 };
 pub use document_artifacts::{
-    DocumentArtifact, DocumentArtifactSegment, DocumentEvidenceMatch, artifact_path_for,
-    find_relevant_document_matches, format_document_matches_preview, is_document_resource_path,
-    load_document_artifact, resource_kind_from_path,
+    artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
+    is_document_resource_path, load_document_artifact, resource_kind_from_path, DocumentArtifact,
+    DocumentArtifactSegment, DocumentEvidenceMatch,
 };
 pub use event_sink::{EventSink, NullEventSink};
 pub use events::*;
@@ -41,6 +42,7 @@ pub use provider::{
     AgentProvider, AgentResponseMode, AgentSamplingProfile, AgentSelectionScope, AgentStatus,
     AgentTaskKind, AgentTurnDescriptor, AgentTurnHandle, AgentTurnProfile,
 };
+pub use providers::{chat_completions, openai, AgentTurnOutcome};
 pub use review_runtime::AgentReviewArtifact;
 pub use session::{
     AgentRuntimeState, AgentSessionRecord, AgentSessionSummary, AgentSessionWorkState,
@@ -48,28 +50,30 @@ pub use session::{
     ToolApprovalDecision, ToolApprovalRecord, ToolApprovalState,
 };
 pub use streaming::{
-    TOOL_ARGUMENTS_RETRY_HINT, extract_function_call_item, extract_response_id,
-    merge_stream_fragment, parse_sse_frame, push_reasoning_delta, sampling_profile_params,
-    take_next_sse_frame,
+    extract_function_call_item, extract_response_id, merge_stream_fragment, parse_sse_frame,
+    push_reasoning_delta, sampling_profile_params, take_next_sse_frame, TOOL_ARGUMENTS_RETRY_HINT,
 };
 pub use telemetry::{
-    DocumentQuestionMetricsRecord, ToolExecutionRecord, ToolExecutionTimer, document_artifact_miss,
-    document_fallback_used, record_document_question_metrics, record_tool_execution,
+    document_artifact_miss, document_fallback_used, record_document_question_metrics,
+    record_tool_execution, DocumentQuestionMetricsRecord, ToolExecutionRecord, ToolExecutionTimer,
 };
 pub use tools::{
-    AgentToolCall, AgentToolContract, AgentToolResult, AgentToolResultDisplayContent,
-    AgentToolSpec, ToolApprovalPolicy, ToolCapabilityClass, ToolExecutionPolicyContext,
-    ToolResourceScope, ToolResultShape, ToolReviewPolicy, ToolSuspendBehavior, default_tool_specs,
-    parse_tool_arguments, to_chat_completions_tool_schema, to_openai_tool_schema,
+    default_tool_specs, parse_tool_arguments, to_chat_completions_tool_schema,
+    to_openai_tool_schema, AgentToolCall, AgentToolContract, AgentToolResult,
+    AgentToolResultDisplayContent, AgentToolSpec, ToolApprovalPolicy, ToolCapabilityClass,
+    ToolExecutionPolicyContext, ToolResourceScope, ToolResultShape, ToolReviewPolicy,
+    ToolSuspendBehavior,
 };
 pub use turn_engine::{
-    AGENT_CANCELLED_MESSAGE, ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, TurnBudget,
-    compact_chat_messages, emit_agent_complete, emit_approval_requested, emit_error, emit_status,
-    emit_text_delta, emit_tool_call, emit_tool_interrupt_state, emit_tool_result,
-    emit_tool_resumed, emit_turn_resumed, emit_workflow_checkpoint_approved,
-    emit_workflow_checkpoint_rejected, emit_workflow_checkpoint_requested, estimate_tokens,
+    compact_chat_messages, emit_agent_complete, emit_approval_requested, emit_error,
+    emit_review_artifact_ready, emit_status, emit_text_delta, emit_tool_call,
+    emit_tool_interrupt_state, emit_tool_result, emit_tool_resumed, emit_turn_resumed,
+    emit_workflow_checkpoint_approved, emit_workflow_checkpoint_rejected,
+    emit_workflow_checkpoint_requested, estimate_tokens, execute_tool_calls,
     request_has_binary_attachment_context, should_surface_assistant_text,
     tool_result_feedback_for_model, tool_result_has_invalid_arguments_error, tool_result_status,
+    ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, ToolExecutorFn, TurnBudget,
+    AGENT_CANCELLED_MESSAGE,
 };
 pub use workflows::{
     AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
