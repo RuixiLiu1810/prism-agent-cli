@@ -1,3 +1,4 @@
+mod args;
 mod tool_executor;
 
 use std::{
@@ -12,42 +13,7 @@ use agent_core::{
     AgentTurnProfile, EventSink, StaticConfigProvider, ToolExecutorFn,
 };
 use clap::Parser;
-
-/// Claude Prism agent runtime (standalone CLI).
-///
-/// Runs the agent outside of the Tauri desktop app.
-/// Events are emitted as JSON Lines on stdout.
-#[derive(Parser, Debug)]
-#[command(name = "agent-runtime", version)]
-struct Args {
-    /// API key for the LLM provider
-    #[arg(long, env = "AGENT_API_KEY")]
-    api_key: String,
-
-    /// Provider name. Supported values: openai, minimax, deepseek
-    #[arg(long, env = "AGENT_PROVIDER", default_value = "openai")]
-    provider: String,
-
-    /// Model name for the selected provider (for example, gpt-5.4)
-    #[arg(long, env = "AGENT_MODEL")]
-    model: String,
-
-    /// Base URL for the provider API
-    #[arg(long, env = "AGENT_BASE_URL")]
-    base_url: Option<String>,
-
-    /// Path to the project directory
-    #[arg(long)]
-    project_path: String,
-
-    /// Prompt text for the current turn
-    #[arg(long)]
-    prompt: String,
-
-    /// Tab/session identifier for emitted events
-    #[arg(long, default_value = "cli-tab")]
-    tab_id: String,
-}
+use args::Args;
 
 /// EventSink that writes JSON Lines to stdout.
 struct StdioEventSink;
@@ -200,7 +166,7 @@ async fn main() -> ExitCode {
     let runtime_state = AgentRuntimeState::default();
     let mut request = AgentTurnDescriptor {
         project_path: args.project_path,
-        prompt: args.prompt,
+        prompt: args.prompt.unwrap_or_default(),
         tab_id: args.tab_id.clone(),
         model: Some(args.model),
         local_session_id: Some(format!("{}-session", args.tab_id)),
