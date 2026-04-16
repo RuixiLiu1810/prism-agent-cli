@@ -1,6 +1,7 @@
 mod args;
 mod output;
 mod tool_executor;
+mod turn_runner;
 
 use std::{
     process::ExitCode,
@@ -8,8 +9,8 @@ use std::{
 };
 
 use agent_core::{
-    emit_agent_complete, emit_error, providers, AgentResponseMode, AgentRuntimeConfig,
-    AgentRuntimeState, AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink,
+    emit_agent_complete, emit_error, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState,
+    AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink,
     StaticConfigProvider, ToolExecutorFn,
 };
 use args::Args;
@@ -23,7 +24,6 @@ fn emit_cli_failure(sink: &dyn EventSink, tab_id: &str, code: &str, message: &st
 
 fn default_base_url(provider: &str) -> Option<&'static str> {
     match provider {
-        "openai" => Some("https://api.openai.com/v1"),
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "minimax" => Some("https://api.minimax.chat/v1"),
         _ => None,
@@ -36,11 +36,6 @@ fn completion_outcome(suspended: bool) -> &'static str {
     } else {
         "completed"
     }
-}
-
-fn request_requires_tools(request: &AgentTurnDescriptor) -> bool {
-    let profile = agent_core::resolve_turn_profile(request);
-    agent_core::tool_choice_for_task(request, &profile) == "required"
 }
 
 #[cfg(test)]
@@ -104,7 +99,7 @@ mod tests {
             previous_response_id: None,
             turn_profile: None,
         };
-        assert!(request_requires_tools(&request));
+        assert!(turn_runner::request_requires_tools(&request));
     }
 }
 
@@ -115,7 +110,7 @@ async fn main() -> ExitCode {
 
     let Some(default_base_url) = default_base_url(&provider) else {
         let message = format!(
-            "Unsupported provider '{}'. Supported providers: openai, minimax, deepseek.",
+            "Unsupported provider '{}'. Supported providers: minimax, deepseek.",
             args.provider
         );
         let fallback_sink = JsonlEventSink::stdout();
@@ -165,7 +160,7 @@ async fn main() -> ExitCode {
         previous_response_id: None,
         turn_profile: None,
     };
-    if request_requires_tools(&request) {
+    if turn_runner::request_requires_tools(&request) {
         let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
         emit_cli_failure(sink.as_ref(), &request.tab_id, "tool_backend_unavailable", &message);
         eprintln!("agent-runtime error: {message}");
@@ -181,33 +176,14 @@ async fn main() -> ExitCode {
         Box::pin(async move { tool_executor::execute_cli_tool(call) })
     });
 
-    let result = match provider.as_str() {
-        "openai" => {
-            providers::openai::run_turn_loop(
-                sink.as_ref(),
-                &config_provider,
-                &runtime_state,
-                &request,
-                tool_executor.clone(),
-                None,
-            )
-            .await
-        }
-        "minimax" | "deepseek" => {
-            let history = Vec::new();
-            providers::chat_completions::run_turn_loop(
-                sink.as_ref(),
-                &config_provider,
-                &runtime_state,
-                &request,
-                &history,
-                tool_executor,
-                None,
-            )
-            .await
-        }
-        _ => unreachable!("provider already validated"),
-    };
+    let result = turn_runner::run_turn(
+        sink.as_ref(),
+        &config_provider,
+        &runtime_state,
+        &request,
+        tool_executor,
+    )
+    .await;
 
     match result {
         Ok(outcome) => {
