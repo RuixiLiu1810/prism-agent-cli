@@ -1,40 +1,20 @@
 mod args;
+mod output;
 mod tool_executor;
 
 use std::{
-    io::{self, Write},
     process::ExitCode,
     sync::Arc,
 };
 
 use agent_core::{
-    emit_agent_complete, emit_error, providers, AgentCompletePayload, AgentEventEnvelope,
-    AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState, AgentTaskKind, AgentTurnDescriptor,
-    AgentTurnProfile, EventSink, StaticConfigProvider, ToolExecutorFn,
+    emit_agent_complete, emit_error, providers, AgentResponseMode, AgentRuntimeConfig,
+    AgentRuntimeState, AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink,
+    StaticConfigProvider, ToolExecutorFn,
 };
-use clap::Parser;
 use args::Args;
-
-/// EventSink that writes JSON Lines to stdout.
-struct StdioEventSink;
-
-impl EventSink for StdioEventSink {
-    fn emit_event(&self, envelope: &AgentEventEnvelope) {
-        if let Ok(json) = serde_json::to_string(envelope) {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            let _ = writeln!(handle, "{}", json);
-        }
-    }
-
-    fn emit_complete(&self, payload: &AgentCompletePayload) {
-        if let Ok(json) = serde_json::to_string(payload) {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            let _ = writeln!(handle, "{}", json);
-        }
-    }
-}
+use clap::Parser;
+use output::{HumanEventSink, JsonlEventSink};
 
 fn emit_cli_failure(sink: &dyn EventSink, tab_id: &str, code: &str, message: &str) {
     emit_error(sink, tab_id, code, message.to_string());
@@ -138,10 +118,23 @@ async fn main() -> ExitCode {
             "Unsupported provider '{}'. Supported providers: openai, minimax, deepseek.",
             args.provider
         );
-        let event_sink = StdioEventSink;
-        emit_cli_failure(&event_sink, &args.tab_id, "unsupported_provider", &message);
+        let fallback_sink = JsonlEventSink::stdout();
+        emit_cli_failure(&fallback_sink, &args.tab_id, "unsupported_provider", &message);
         eprintln!("agent-runtime error: {message}");
         return ExitCode::FAILURE;
+    };
+
+    let output_mode = match args::parse_output_mode(&args.output) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("agent-runtime error: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let sink: Arc<dyn EventSink> = match output_mode {
+        args::OutputMode::Human => Arc::new(HumanEventSink::stdout()),
+        args::OutputMode::Jsonl => Arc::new(JsonlEventSink::stdout()),
     };
 
     let base_url = args
@@ -162,7 +155,6 @@ async fn main() -> ExitCode {
         config_dir: std::env::temp_dir().join("agent-runtime"),
     };
 
-    let event_sink = StdioEventSink;
     let runtime_state = AgentRuntimeState::default();
     let mut request = AgentTurnDescriptor {
         project_path: args.project_path,
@@ -175,12 +167,7 @@ async fn main() -> ExitCode {
     };
     if request_requires_tools(&request) {
         let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
-        emit_cli_failure(
-            &event_sink,
-            &request.tab_id,
-            "tool_backend_unavailable",
-            &message,
-        );
+        emit_cli_failure(sink.as_ref(), &request.tab_id, "tool_backend_unavailable", &message);
         eprintln!("agent-runtime error: {message}");
         return ExitCode::FAILURE;
     }
@@ -197,7 +184,7 @@ async fn main() -> ExitCode {
     let result = match provider.as_str() {
         "openai" => {
             providers::openai::run_turn_loop(
-                &event_sink,
+                sink.as_ref(),
                 &config_provider,
                 &runtime_state,
                 &request,
@@ -209,7 +196,7 @@ async fn main() -> ExitCode {
         "minimax" | "deepseek" => {
             let history = Vec::new();
             providers::chat_completions::run_turn_loop(
-                &event_sink,
+                sink.as_ref(),
                 &config_provider,
                 &runtime_state,
                 &request,
@@ -224,11 +211,11 @@ async fn main() -> ExitCode {
 
     match result {
         Ok(outcome) => {
-            emit_agent_complete(&event_sink, &request.tab_id, completion_outcome(outcome.suspended));
+            emit_agent_complete(sink.as_ref(), &request.tab_id, completion_outcome(outcome.suspended));
             ExitCode::SUCCESS
         }
         Err(error) => {
-            emit_cli_failure(&event_sink, &request.tab_id, "turn_loop_failed", &error);
+            emit_cli_failure(sink.as_ref(), &request.tab_id, "turn_loop_failed", &error);
             eprintln!("agent-runtime error: {error}");
             ExitCode::FAILURE
         }
