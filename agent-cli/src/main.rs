@@ -4,17 +4,14 @@ mod repl;
 mod tool_executor;
 mod turn_runner;
 
-use std::{
-    process::ExitCode,
-    sync::Arc,
-};
+use std::{process::ExitCode, sync::Arc};
 
 use agent_core::{
     emit_agent_complete, emit_error, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState,
-    AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink,
-    StaticConfigProvider, ToolExecutorFn,
+    AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
+    ToolExecutorFn,
 };
-use args::Args;
+use args::{Args, RunMode};
 use clap::Parser;
 use output::{HumanEventSink, JsonlEventSink};
 
@@ -39,6 +36,27 @@ fn completion_outcome(suspended: bool) -> &'static str {
     }
 }
 
+fn build_request(args: &Args, prompt: String, local_session_id: &str) -> AgentTurnDescriptor {
+    let mut request = AgentTurnDescriptor {
+        project_path: args.project_path.clone(),
+        prompt,
+        tab_id: args.tab_id.clone(),
+        model: Some(args.model.clone()),
+        local_session_id: Some(local_session_id.to_string()),
+        previous_response_id: None,
+        turn_profile: None,
+    };
+
+    // MVP-1 keeps fallback tool executor; force suggestion-only to avoid required tool calls.
+    request.turn_profile = Some(AgentTurnProfile {
+        task_kind: AgentTaskKind::SuggestionOnly,
+        response_mode: AgentResponseMode::SuggestionOnly,
+        ..AgentTurnProfile::default()
+    });
+
+    request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,11 +71,19 @@ mod tests {
 
     impl EventSink for RecordingSink {
         fn emit_event(&self, envelope: &AgentEventEnvelope) {
-            self.events.lock().unwrap().push(envelope.clone());
+            let mut guard = match self.events.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.push(envelope.clone());
         }
 
         fn emit_complete(&self, payload: &AgentCompletePayload) {
-            self.completes.lock().unwrap().push(payload.clone());
+            let mut guard = match self.completes.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.push(payload.clone());
         }
     }
 
@@ -67,7 +93,10 @@ mod tests {
 
         emit_cli_failure(&sink, "tab-1", "turn_loop_failed", "network down");
 
-        let events = sink.events.lock().unwrap();
+        let events = match sink.events.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         assert_eq!(events.len(), 1);
         match &events[0].payload {
             AgentEventPayload::Error(error) => {
@@ -77,7 +106,10 @@ mod tests {
             payload => panic!("expected error event, got {payload:?}"),
         }
 
-        let completes = sink.completes.lock().unwrap();
+        let completes = match sink.completes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         assert_eq!(completes.len(), 1);
         assert_eq!(completes[0].tab_id, "tab-1");
         assert_eq!(completes[0].outcome, "error");
@@ -102,14 +134,26 @@ mod tests {
         };
         assert!(turn_runner::request_requires_tools(&request));
     }
+
+    #[test]
+    fn default_base_url_prefers_chat_completions_endpoints() {
+        assert_eq!(
+            default_base_url("minimax"),
+            Some("https://api.minimax.chat/v1")
+        );
+        assert_eq!(
+            default_base_url("deepseek"),
+            Some("https://api.deepseek.com/v1")
+        );
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
-    let provider = args.provider.trim().to_lowercase();
+    let provider = args.provider.trim().to_ascii_lowercase();
 
-    let Some(default_base_url) = default_base_url(&provider) else {
+    let Some(default_url) = default_base_url(&provider) else {
         let message = format!(
             "Unsupported provider '{}'. Supported providers: minimax, deepseek.",
             args.provider
@@ -133,68 +177,134 @@ async fn main() -> ExitCode {
         args::OutputMode::Jsonl => Arc::new(JsonlEventSink::stdout()),
     };
 
-    let base_url = args
+    let mut config = AgentRuntimeConfig::default_local_agent();
+    config.provider = provider;
+    config.model = args.model.clone();
+    config.api_key = Some(args.api_key.clone());
+    config.base_url = args
         .base_url
-        .unwrap_or_else(|| default_base_url.to_string());
+        .clone()
+        .unwrap_or_else(|| default_url.to_string());
 
-    let config = {
-        let mut c = AgentRuntimeConfig::default_local_agent();
-        c.provider = provider.clone();
-        c.model = args.model.clone();
-        c.api_key = Some(args.api_key);
-        c.base_url = base_url;
-        c
-    };
-
-    let config_provider = StaticConfigProvider {
+    let config_provider = Arc::new(StaticConfigProvider {
         config,
         config_dir: std::env::temp_dir().join("agent-runtime"),
-    };
-
-    let runtime_state = AgentRuntimeState::default();
-    let mut request = AgentTurnDescriptor {
-        project_path: args.project_path,
-        prompt: args.prompt.unwrap_or_default(),
-        tab_id: args.tab_id.clone(),
-        model: Some(args.model),
-        local_session_id: Some(format!("{}-session", args.tab_id)),
-        previous_response_id: None,
-        turn_profile: None,
-    };
-    if turn_runner::request_requires_tools(&request) {
-        let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
-        emit_cli_failure(sink.as_ref(), &request.tab_id, "tool_backend_unavailable", &message);
-        eprintln!("agent-runtime error: {message}");
-        return ExitCode::FAILURE;
-    }
-    // CLI currently uses a fallback tool executor; steer non-tool turns away from tool-calling.
-    request.turn_profile = Some(AgentTurnProfile {
-        task_kind: AgentTaskKind::SuggestionOnly,
-        response_mode: AgentResponseMode::SuggestionOnly,
-        ..AgentTurnProfile::default()
     });
+    let runtime_state = Arc::new(AgentRuntimeState::default());
+
     let tool_executor: ToolExecutorFn = Arc::new(|call, _cancel_rx| {
         Box::pin(async move { tool_executor::execute_cli_tool(call) })
     });
 
-    let result = turn_runner::run_turn(
-        sink.as_ref(),
-        &config_provider,
-        &runtime_state,
-        &request,
-        tool_executor,
-    )
-    .await;
+    let local_session_id = format!("{}-session", args.tab_id);
 
-    match result {
-        Ok(outcome) => {
-            emit_agent_complete(sink.as_ref(), &request.tab_id, completion_outcome(outcome.suspended));
-            ExitCode::SUCCESS
+    match args.run_mode() {
+        RunMode::SingleTurn => {
+            let prompt = args.prompt.clone().unwrap_or_default();
+            let request = build_request(&args, prompt, &local_session_id);
+            if turn_runner::request_requires_tools(&request) {
+                let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
+                emit_cli_failure(
+                    sink.as_ref(),
+                    &request.tab_id,
+                    "tool_backend_unavailable",
+                    &message,
+                );
+                eprintln!("agent-runtime error: {message}");
+                return ExitCode::FAILURE;
+            }
+
+            match turn_runner::run_turn(
+                sink.as_ref(),
+                config_provider.as_ref(),
+                runtime_state.as_ref(),
+                &request,
+                Arc::clone(&tool_executor),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    emit_agent_complete(
+                        sink.as_ref(),
+                        &request.tab_id,
+                        completion_outcome(outcome.suspended),
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    emit_cli_failure(sink.as_ref(), &args.tab_id, "turn_loop_failed", &error);
+                    eprintln!("agent-runtime error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
-        Err(error) => {
-            emit_cli_failure(sink.as_ref(), &request.tab_id, "turn_loop_failed", &error);
-            eprintln!("agent-runtime error: {error}");
-            ExitCode::FAILURE
+        RunMode::Repl => {
+            let mut stdout = std::io::stdout();
+            let reader = repl::stdin_reader();
+            let repl_args = args.clone();
+            let repl_session_id = local_session_id.clone();
+            let repl_sink = Arc::clone(&sink);
+            let repl_config_provider = Arc::clone(&config_provider);
+            let repl_runtime_state = Arc::clone(&runtime_state);
+            let repl_tool_executor = Arc::clone(&tool_executor);
+
+            let res = repl::run_repl(reader, &mut stdout, move |prompt| {
+                let request = build_request(&repl_args, prompt, &repl_session_id);
+                let sink = Arc::clone(&repl_sink);
+                let config_provider = Arc::clone(&repl_config_provider);
+                let runtime_state = Arc::clone(&repl_runtime_state);
+                let tool_executor = Arc::clone(&repl_tool_executor);
+
+                Box::pin(async move {
+                    if turn_runner::request_requires_tools(&request) {
+                        let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
+                        emit_cli_failure(
+                            sink.as_ref(),
+                            &request.tab_id,
+                            "tool_backend_unavailable",
+                            &message,
+                        );
+                        return Ok(());
+                    }
+
+                    match turn_runner::run_turn(
+                        sink.as_ref(),
+                        config_provider.as_ref(),
+                        runtime_state.as_ref(),
+                        &request,
+                        tool_executor,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            emit_agent_complete(
+                                sink.as_ref(),
+                                &request.tab_id,
+                                completion_outcome(outcome.suspended),
+                            );
+                            Ok(())
+                        }
+                        Err(error) => {
+                            emit_cli_failure(
+                                sink.as_ref(),
+                                &request.tab_id,
+                                "turn_loop_failed",
+                                &error,
+                            );
+                            Ok(())
+                        }
+                    }
+                })
+            })
+            .await;
+
+            if let Err(error) = res {
+                emit_cli_failure(sink.as_ref(), &args.tab_id, "repl_failed", &error);
+                eprintln!("agent-runtime error: {error}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
     }
 }

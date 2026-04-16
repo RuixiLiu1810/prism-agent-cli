@@ -24,6 +24,7 @@ impl JsonlEventSink {
         }
     }
 
+    #[cfg(test)]
     pub fn for_test() -> Self {
         Self {
             writer: Mutex::new(Vec::new()),
@@ -31,6 +32,7 @@ impl JsonlEventSink {
         }
     }
 
+    #[cfg(test)]
     pub fn take_test_output(&self) -> String {
         let mut guard = match self.writer.lock() {
             Ok(guard) => guard,
@@ -78,6 +80,7 @@ impl HumanEventSink {
         }
     }
 
+    #[cfg(test)]
     pub fn for_test() -> Self {
         Self {
             writer: Mutex::new(Vec::new()),
@@ -85,6 +88,7 @@ impl HumanEventSink {
         }
     }
 
+    #[cfg(test)]
     pub fn take_test_output(&self) -> String {
         let mut guard = match self.writer.lock() {
             Ok(guard) => guard,
