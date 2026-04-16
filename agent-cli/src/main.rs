@@ -1,5 +1,6 @@
 mod args;
 mod output;
+mod repl;
 mod tool_executor;
 mod turn_runner;
 
