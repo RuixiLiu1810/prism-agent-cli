@@ -19,7 +19,7 @@ use agent_core::{
     AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
     ToolExecutorFn,
 };
-use args::{Args, Command, ConfigSubcommand, OutputMode, RunMode};
+use args::{Args, Command, ConfigSubcommand, OutputMode, RunMode, ToolMode};
 use clap::Parser;
 use config_model::ResolvedConfig;
 use output::{HumanEventSink, JsonlEventSink};
@@ -44,6 +44,7 @@ fn build_request(
     model: &str,
     prompt: String,
     local_session_id: &str,
+    tool_mode: ToolMode,
 ) -> AgentTurnDescriptor {
     let mut request = AgentTurnDescriptor {
         project_path: project_path.to_string(),
@@ -55,12 +56,13 @@ fn build_request(
         turn_profile: None,
     };
 
-    // CLI keeps fallback tool executor; steer turns away from mandatory tool usage.
-    request.turn_profile = Some(AgentTurnProfile {
-        task_kind: AgentTaskKind::SuggestionOnly,
-        response_mode: AgentResponseMode::SuggestionOnly,
-        ..AgentTurnProfile::default()
-    });
+    if tool_mode == ToolMode::Off {
+        request.turn_profile = Some(AgentTurnProfile {
+            task_kind: AgentTaskKind::SuggestionOnly,
+            response_mode: AgentResponseMode::SuggestionOnly,
+            ..AgentTurnProfile::default()
+        });
+    }
 
     request
 }
@@ -315,6 +317,36 @@ mod tests {
     }
 
     #[test]
+    fn build_request_sets_suggestion_profile_in_off_mode() {
+        let request = build_request(
+            ".",
+            "tab-1",
+            "MiniMax-M1",
+            "hello".to_string(),
+            "session-1",
+            ToolMode::Off,
+        );
+        let profile = request
+            .turn_profile
+            .unwrap_or_else(|| panic!("turn_profile should be set in off mode"));
+        assert_eq!(profile.task_kind, AgentTaskKind::SuggestionOnly);
+        assert_eq!(profile.response_mode, AgentResponseMode::SuggestionOnly);
+    }
+
+    #[test]
+    fn build_request_keeps_default_profile_in_safe_mode() {
+        let request = build_request(
+            ".",
+            "tab-1",
+            "MiniMax-M1",
+            "hello".to_string(),
+            "session-1",
+            ToolMode::Safe,
+        );
+        assert!(request.turn_profile.is_none());
+    }
+
+    #[test]
     fn startup_requests_wizard_when_required_fields_are_missing() {
         let merged = config_resolver::RawConfig::default();
         let missing = config_resolver::detect_missing(&merged);
@@ -360,6 +392,13 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let tool_mode = match args::parse_tool_mode(args.tool_mode.as_deref().unwrap_or("safe")) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("agent-runtime error: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
 
     let sink: Arc<dyn EventSink> = match output_mode {
         args::OutputMode::Human => Arc::new(HumanEventSink::stdout()),
@@ -382,9 +421,10 @@ async fn main() -> ExitCode {
                 &resolved.model,
                 prompt,
                 &local_session_id,
+                tool_mode,
             );
 
-            if turn_runner::request_requires_tools(&request) {
+            if tool_mode == ToolMode::Off && turn_runner::request_requires_tools(&request) {
                 let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
                 emit_cli_failure(
                     sink.as_ref(),
@@ -559,6 +599,7 @@ async fn main() -> ExitCode {
                     &resolved.model,
                     prompt,
                     &repl_session_id,
+                    tool_mode,
                 );
                 let sink = Arc::clone(&repl_sink);
                 let runtime_state = Arc::clone(&repl_runtime_state);
@@ -568,7 +609,8 @@ async fn main() -> ExitCode {
                 let session_id_for_turn = repl_session_id.clone();
 
                 Box::pin(async move {
-                    if turn_runner::request_requires_tools(&request) {
+                    if tool_mode == ToolMode::Off && turn_runner::request_requires_tools(&request)
+                    {
                         let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
                         emit_cli_failure(
                             sink.as_ref(),

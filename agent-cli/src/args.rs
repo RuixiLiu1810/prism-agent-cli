@@ -13,6 +13,12 @@ pub enum OutputMode {
     Jsonl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    Off,
+    Safe,
+}
+
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum ConfigSubcommand {
     Init,
@@ -35,6 +41,17 @@ pub fn parse_output_mode(raw: &str) -> Result<OutputMode, String> {
         "jsonl" => Ok(OutputMode::Jsonl),
         other => Err(format!(
             "Unsupported output mode '{}'. Use 'human' or 'jsonl'.",
+            other
+        )),
+    }
+}
+
+pub fn parse_tool_mode(raw: &str) -> Result<ToolMode, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(ToolMode::Off),
+        "safe" => Ok(ToolMode::Safe),
+        other => Err(format!(
+            "Unsupported tool mode '{}'. Use 'off' or 'safe'.",
             other
         )),
     }
@@ -69,6 +86,9 @@ pub struct Args {
 
     #[arg(long)]
     pub output: Option<String>,
+
+    #[arg(long, env = "AGENT_TOOL_MODE")]
+    pub tool_mode: Option<String>,
 }
 
 impl Args {
@@ -85,7 +105,10 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_output_mode, Args, Command, ConfigSubcommand, OutputMode, RunMode};
+    use super::{
+        parse_output_mode, parse_tool_mode, Args, Command, ConfigSubcommand, OutputMode, RunMode,
+        ToolMode,
+    };
     use clap::Parser;
 
     #[test]
@@ -140,6 +163,33 @@ mod tests {
         assert_eq!(
             parse_output_mode("jsonl").unwrap_or_else(|e| panic!("parse: {e}")),
             OutputMode::Jsonl
+        );
+    }
+
+    #[test]
+    fn parses_tool_mode_safe_and_off() {
+        let args = Args::parse_from(["agent-runtime", "--tool-mode", "safe"]);
+        assert_eq!(args.tool_mode.as_deref(), Some("safe"));
+
+        let args = Args::parse_from(["agent-runtime", "--tool-mode", "off"]);
+        assert_eq!(args.tool_mode.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn parse_tool_mode_rejects_unknown_value() {
+        let err = parse_tool_mode("danger").err();
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn parse_tool_mode_parses_safe_and_off() {
+        assert_eq!(
+            parse_tool_mode("safe").unwrap_or_else(|e| panic!("parse: {e}")),
+            ToolMode::Safe
+        );
+        assert_eq!(
+            parse_tool_mode("off").unwrap_or_else(|e| panic!("parse: {e}")),
+            ToolMode::Off
         );
     }
 }
