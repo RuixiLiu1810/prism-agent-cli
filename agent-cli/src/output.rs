@@ -115,6 +115,17 @@ impl HumanEventSink {
     }
 
     fn render_tool_result(result: &AgentToolResultEvent) -> String {
+        if result
+            .content
+            .get("approvalRequired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return format!(
+                "\n[result] {}\n[hint] run /approve shell once or /approve shell session\n",
+                result.preview
+            );
+        }
         format!("\n[result] {}\n", result.preview)
     }
 
@@ -186,5 +197,25 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.contains("\"outcome\":\"completed\""));
+    }
+
+    #[test]
+    fn human_sink_prints_approval_hint_for_tool_result() {
+        use agent_core::AgentToolResultEvent;
+        let sink = HumanEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::ToolResult(AgentToolResultEvent {
+                tool_name: "run_shell_command".to_string(),
+                call_id: "call-1".to_string(),
+                is_error: true,
+                preview: "run_shell_command requires approval".to_string(),
+                content: serde_json::json!({"approvalRequired": true}),
+                display: serde_json::Value::Null,
+            }),
+        });
+
+        let out = sink.take_test_output();
+        assert!(out.contains("/approve shell once"));
     }
 }

@@ -68,9 +68,7 @@ fn extract_first_command_token(command: &str) -> &str {
 
 fn is_allowed_command(command: &str) -> bool {
     let first_token = extract_first_command_token(command);
-    ALLOWED_SHELL_COMMANDS
-        .iter()
-        .any(|allowed| first_token == *allowed)
+    ALLOWED_SHELL_COMMANDS.contains(&first_token)
 }
 
 fn truncate_command_output(bytes: &[u8], max_bytes: usize) -> (String, bool) {
