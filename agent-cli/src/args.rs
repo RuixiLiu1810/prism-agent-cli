@@ -1,7 +1,8 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
+    Command,
     SingleTurn,
     Repl,
 }
@@ -10,6 +11,22 @@ pub enum RunMode {
 pub enum OutputMode {
     Human,
     Jsonl,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum ConfigSubcommand {
+    Init,
+    Edit,
+    Show,
+    Path,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum Command {
+    Config {
+        #[command(subcommand)]
+        action: ConfigSubcommand,
+    },
 }
 
 pub fn parse_output_mode(raw: &str) -> Result<OutputMode, String> {
@@ -26,19 +43,22 @@ pub fn parse_output_mode(raw: &str) -> Result<OutputMode, String> {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "agent-runtime", version)]
 pub struct Args {
-    #[arg(long, env = "AGENT_API_KEY")]
-    pub api_key: String,
-
-    #[arg(long, env = "AGENT_PROVIDER", default_value = "minimax")]
-    pub provider: String,
-
-    #[arg(long, env = "AGENT_MODEL")]
-    pub model: String,
-
-    #[arg(long, env = "AGENT_BASE_URL")]
-    pub base_url: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
     #[arg(long)]
+    pub api_key: Option<String>,
+
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    #[arg(long)]
+    pub model: Option<String>,
+
+    #[arg(long)]
+    pub base_url: Option<String>,
+
+    #[arg(long, default_value = ".")]
     pub project_path: String,
 
     #[arg(long)]
@@ -47,13 +67,15 @@ pub struct Args {
     #[arg(long, default_value = "cli-tab")]
     pub tab_id: String,
 
-    #[arg(long, default_value = "human")]
-    pub output: String,
+    #[arg(long)]
+    pub output: Option<String>,
 }
 
 impl Args {
     pub fn run_mode(&self) -> RunMode {
-        if self.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        if self.command.is_some() {
+            RunMode::Command
+        } else if self.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) {
             RunMode::SingleTurn
         } else {
             RunMode::Repl
@@ -63,15 +85,13 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_output_mode, Args, OutputMode, RunMode};
+    use super::{parse_output_mode, Args, Command, ConfigSubcommand, OutputMode, RunMode};
     use clap::Parser;
 
     #[test]
     fn detects_single_turn_when_prompt_is_present() {
         let args = Args::parse_from([
             "agent-runtime",
-            "--api-key",
-            "k",
             "--project-path",
             ".",
             "--model",
@@ -86,8 +106,6 @@ mod tests {
     fn detects_repl_when_prompt_is_absent() {
         let args = Args::parse_from([
             "agent-runtime",
-            "--api-key",
-            "k",
             "--project-path",
             ".",
             "--model",
@@ -97,8 +115,31 @@ mod tests {
     }
 
     #[test]
+    fn detects_config_subcommand_mode() {
+        let args = Args::parse_from(["agent-runtime", "config", "path"]);
+        assert_eq!(args.run_mode(), RunMode::Command);
+    }
+
+    #[test]
+    fn parses_config_edit_subcommand() {
+        let args = Args::parse_from(["agent-runtime", "config", "edit"]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Config {
+                action: ConfigSubcommand::Edit
+            })
+        ));
+    }
+
+    #[test]
     fn parses_output_mode_human_and_jsonl() {
-        assert_eq!(parse_output_mode("human").unwrap(), OutputMode::Human);
-        assert_eq!(parse_output_mode("jsonl").unwrap(), OutputMode::Jsonl);
+        assert_eq!(
+            parse_output_mode("human").unwrap_or_else(|e| panic!("parse: {e}")),
+            OutputMode::Human
+        );
+        assert_eq!(
+            parse_output_mode("jsonl").unwrap_or_else(|e| panic!("parse: {e}")),
+            OutputMode::Jsonl
+        );
     }
 }

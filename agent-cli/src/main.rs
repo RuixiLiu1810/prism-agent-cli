@@ -1,4 +1,6 @@
 mod args;
+mod config_model;
+mod config_store;
 mod output;
 mod repl;
 mod tool_executor;
@@ -41,7 +43,7 @@ fn build_request(args: &Args, prompt: String, local_session_id: &str) -> AgentTu
         project_path: args.project_path.clone(),
         prompt,
         tab_id: args.tab_id.clone(),
-        model: Some(args.model.clone()),
+        model: args.model.clone(),
         local_session_id: Some(local_session_id.to_string()),
         previous_response_id: None,
         turn_profile: None,
@@ -151,12 +153,22 @@ mod tests {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
-    let provider = args.provider.trim().to_ascii_lowercase();
+    if let RunMode::Command = args.run_mode() {
+        eprintln!("agent-runtime error: config command path not wired yet");
+        return ExitCode::FAILURE;
+    }
+
+    let provider = args
+        .provider
+        .clone()
+        .unwrap_or_else(|| "minimax".to_string())
+        .trim()
+        .to_ascii_lowercase();
 
     let Some(default_url) = default_base_url(&provider) else {
         let message = format!(
             "Unsupported provider '{}'. Supported providers: minimax, deepseek.",
-            args.provider
+            args.provider.as_deref().unwrap_or("<unset>")
         );
         let fallback_sink = JsonlEventSink::stdout();
         emit_cli_failure(&fallback_sink, &args.tab_id, "unsupported_provider", &message);
@@ -164,7 +176,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let output_mode = match args::parse_output_mode(&args.output) {
+    let output_mode = match args::parse_output_mode(args.output.as_deref().unwrap_or("human")) {
         Ok(mode) => mode,
         Err(err) => {
             eprintln!("agent-runtime error: {}", err);
@@ -179,8 +191,11 @@ async fn main() -> ExitCode {
 
     let mut config = AgentRuntimeConfig::default_local_agent();
     config.provider = provider;
-    config.model = args.model.clone();
-    config.api_key = Some(args.api_key.clone());
+    config.model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| "MiniMax-M1".to_string());
+    config.api_key = args.api_key.clone();
     config.base_url = args
         .base_url
         .clone()
@@ -306,5 +321,6 @@ async fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
+        RunMode::Command => ExitCode::FAILURE,
     }
 }
