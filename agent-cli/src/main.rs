@@ -1,6 +1,8 @@
 mod args;
 mod config_model;
+mod config_resolver;
 mod config_store;
+mod config_wizard;
 mod output;
 mod repl;
 mod tool_executor;
