@@ -5,6 +5,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "/model",
     "/status",
     "/clear",
+    "/approve",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,9 @@ pub enum ReplCommand {
     Clear,
     ModelShow,
     ModelSet(String),
+    ApproveShellOnce,
+    ApproveShellSession,
+    ApproveShellDeny,
     Unknown {
         raw: String,
         suggestion: Option<&'static str>,
@@ -44,6 +48,19 @@ pub fn parse_repl_command(input: &str) -> ReplCommand {
                 ReplCommand::ModelShow
             } else {
                 ReplCommand::ModelSet(model.trim().to_string())
+            }
+        }
+        "/approve" => {
+            let target = parts.next().unwrap_or_default();
+            let mode = parts.next().unwrap_or_default();
+            match (target, mode) {
+                ("shell", "once") => ReplCommand::ApproveShellOnce,
+                ("shell", "session") => ReplCommand::ApproveShellSession,
+                ("shell", "deny") => ReplCommand::ApproveShellDeny,
+                _ => ReplCommand::Unknown {
+                    raw: trimmed.to_string(),
+                    suggestion: Some("/approve shell once"),
+                },
             }
         }
         other => ReplCommand::Unknown {
@@ -121,6 +138,22 @@ mod tests {
         assert_eq!(
             parse_repl_command("/model MiniMax-M1"),
             ReplCommand::ModelSet("MiniMax-M1".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_approve_shell_commands() {
+        assert_eq!(
+            parse_repl_command("/approve shell once"),
+            ReplCommand::ApproveShellOnce
+        );
+        assert_eq!(
+            parse_repl_command("/approve shell session"),
+            ReplCommand::ApproveShellSession
+        );
+        assert_eq!(
+            parse_repl_command("/approve shell deny"),
+            ReplCommand::ApproveShellDeny
         );
     }
 

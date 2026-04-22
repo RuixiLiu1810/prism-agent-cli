@@ -126,6 +126,7 @@ fn render_help_panel() {
   /config    Edit local config interactively
   /model     Show current model
   /model X   Persist model X to local config file
+  /approve shell once|session|deny  Control shell tool approval
   /status    Show current runtime status
   /clear     Clear the screen and redraw header
   exit|quit  Leave REPL"
@@ -140,6 +141,7 @@ fn render_commands_panel() {
   /config
   /model
   /model <model-name>
+  /approve shell once|session|deny
   /status
   /clear"
     );
@@ -579,6 +581,50 @@ async fn main() -> ExitCode {
                             Err(err) => eprintln!("agent-runtime error: {}", err),
                         }
                         return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::ApproveShellOnce => {
+                        let runtime_state = Arc::clone(&repl_runtime_state);
+                        let tab_id = repl_args.tab_id.clone();
+                        return Box::pin(async move {
+                            match runtime_state
+                                .set_tool_approval(&tab_id, "run_shell_command", "allow_once")
+                                .await
+                            {
+                                Ok(()) => {
+                                    println!("Approved shell for one command in this session.")
+                                }
+                                Err(err) => eprintln!("agent-runtime error: {}", err),
+                            }
+                            Ok(())
+                        });
+                    }
+                    command_router::ReplCommand::ApproveShellSession => {
+                        let runtime_state = Arc::clone(&repl_runtime_state);
+                        let tab_id = repl_args.tab_id.clone();
+                        return Box::pin(async move {
+                            match runtime_state
+                                .set_tool_approval(&tab_id, "run_shell_command", "allow_session")
+                                .await
+                            {
+                                Ok(()) => println!("Approved shell for this session."),
+                                Err(err) => eprintln!("agent-runtime error: {}", err),
+                            }
+                            Ok(())
+                        });
+                    }
+                    command_router::ReplCommand::ApproveShellDeny => {
+                        let runtime_state = Arc::clone(&repl_runtime_state);
+                        let tab_id = repl_args.tab_id.clone();
+                        return Box::pin(async move {
+                            match runtime_state
+                                .set_tool_approval(&tab_id, "run_shell_command", "deny_session")
+                                .await
+                            {
+                                Ok(()) => println!("Denied shell for this session."),
+                                Err(err) => eprintln!("agent-runtime error: {}", err),
+                            }
+                            Ok(())
+                        });
                     }
                     command_router::ReplCommand::Unknown { raw, suggestion } => {
                         if let Some(suggestion) = suggestion {
