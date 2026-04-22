@@ -1,10 +1,12 @@
 mod args;
+mod config_commands;
 mod config_model;
 mod config_resolver;
 mod config_store;
 mod config_wizard;
 mod output;
 mod repl;
+mod repl_commands;
 mod tool_executor;
 mod turn_runner;
 
@@ -15,7 +17,7 @@ use agent_core::{
     AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
     ToolExecutorFn,
 };
-use args::{Args, RunMode};
+use args::{Args, Command, ConfigSubcommand, RunMode};
 use clap::Parser;
 use output::{HumanEventSink, JsonlEventSink};
 
@@ -156,7 +158,20 @@ mod tests {
 async fn main() -> ExitCode {
     let args = Args::parse();
     if let RunMode::Command = args.run_mode() {
-        eprintln!("agent-runtime error: config command path not wired yet");
+        if let Some(Command::Config { action }) = &args.command {
+            let mut io = config_wizard::StdioWizardIo;
+            match config_commands::execute_config_command(action, &mut io) {
+                Ok(msg) => {
+                    println!("{}", msg);
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("agent-runtime error: {}", err);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        eprintln!("agent-runtime error: unsupported command");
         return ExitCode::FAILURE;
     }
 
@@ -266,6 +281,26 @@ async fn main() -> ExitCode {
             let repl_tool_executor = Arc::clone(&tool_executor);
 
             let res = repl::run_repl(reader, &mut stdout, move |prompt| {
+                match repl_commands::parse_repl_command(&prompt) {
+                    repl_commands::ReplCommand::Config => {
+                        let mut io = config_wizard::StdioWizardIo;
+                        let _ = config_commands::execute_config_command(
+                            &ConfigSubcommand::Edit,
+                            &mut io,
+                        );
+                        return Box::pin(async { Ok(()) });
+                    }
+                    repl_commands::ReplCommand::Help => {
+                        println!("Commands: /config, /help, exit, quit");
+                        return Box::pin(async { Ok(()) });
+                    }
+                    repl_commands::ReplCommand::Unknown(cmd) => {
+                        println!("Unknown command: {}", cmd);
+                        return Box::pin(async { Ok(()) });
+                    }
+                    repl_commands::ReplCommand::None => {}
+                }
+
                 let request = build_request(&repl_args, prompt, &repl_session_id);
                 let sink = Arc::clone(&repl_sink);
                 let config_provider = Arc::clone(&repl_config_provider);
