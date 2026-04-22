@@ -1,4 +1,5 @@
 mod common;
+mod shell;
 mod workspace;
 
 use agent_core::{
@@ -7,8 +8,8 @@ use agent_core::{
 use tokio::sync::watch;
 
 pub(crate) async fn execute_tool_call(
-    _runtime_state: &AgentRuntimeState,
-    _tab_id: &str,
+    runtime_state: &AgentRuntimeState,
+    tab_id: &str,
     project_root: &str,
     call: AgentToolCall,
     cancel_rx: Option<watch::Receiver<bool>>,
@@ -34,6 +35,17 @@ pub(crate) async fn execute_tool_call(
         "search_project" => {
             workspace::execute_search_project(project_root, &call.call_id, parsed_args, cancel_rx)
                 .await
+        }
+        "run_shell_command" => {
+            shell::execute_run_shell_command(
+                runtime_state,
+                tab_id,
+                project_root,
+                &call.call_id,
+                parsed_args,
+                cancel_rx,
+            )
+            .await
         }
         other => error_result(
             other,
@@ -92,5 +104,29 @@ mod tests {
 
         assert!(result.is_error);
         assert_eq!(result.tool_name, "write_file");
+    }
+
+    #[tokio::test]
+    async fn dispatches_shell_tool() {
+        let runtime = AgentRuntimeState::default();
+        runtime
+            .set_tool_approval("tab-1", "run_shell_command", "allow_once")
+            .await
+            .unwrap_or_else(|e| panic!("set approval: {e}"));
+
+        let result = execute_tool_call(
+            &runtime,
+            "tab-1",
+            ".",
+            AgentToolCall {
+                tool_name: "run_shell_command".to_string(),
+                call_id: "call-1".to_string(),
+                arguments: r#"{"command":"echo ok"}"#.to_string(),
+            },
+            None,
+        )
+        .await;
+
+        assert!(!result.is_error, "result={:?}", result);
     }
 }
