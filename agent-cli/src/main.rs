@@ -6,6 +6,7 @@ mod config_resolver;
 mod config_store;
 mod config_wizard;
 mod header_renderer;
+mod local_tools;
 mod output;
 mod repl;
 mod status_snapshot;
@@ -407,8 +408,18 @@ async fn main() -> ExitCode {
 
     let runtime_state = Arc::new(AgentRuntimeState::default());
 
-    let tool_executor: ToolExecutorFn =
-        Arc::new(|call, _cancel_rx| Box::pin(async move { tool_executor::execute_cli_tool(call) }));
+    let tool_runtime_state = Arc::clone(&runtime_state);
+    let tool_tab_id = args.tab_id.clone();
+    let tool_project_path = args.project_path.clone();
+    let tool_executor: ToolExecutorFn = Arc::new(move |call, cancel_rx| {
+        let runtime_state = Arc::clone(&tool_runtime_state);
+        let tab_id = tool_tab_id.clone();
+        let project_root = tool_project_path.clone();
+        Box::pin(async move {
+            tool_executor::execute_cli_tool(runtime_state, tab_id, project_root, call, cancel_rx)
+                .await
+        })
+    });
 
     let local_session_id = format!("{}-session", args.tab_id);
 

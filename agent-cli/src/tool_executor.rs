@@ -1,41 +1,49 @@
-use agent_core::{AgentToolCall, AgentToolResult};
+use std::sync::Arc;
 
-pub fn execute_cli_tool(call: AgentToolCall) -> AgentToolResult {
-    let tool_name = call.tool_name.clone();
-    let call_id = call.call_id.clone();
+use agent_core::{AgentRuntimeState, AgentToolCall, AgentToolResult};
+use tokio::sync::watch;
 
-    agent_core::tools::error_result(
-        &tool_name,
-        &call_id,
-        format!("Standalone agent-cli does not support tool '{tool_name}' in this runtime."),
+use crate::local_tools;
+
+pub async fn execute_cli_tool(
+    runtime_state: Arc<AgentRuntimeState>,
+    tab_id: String,
+    project_root: String,
+    call: AgentToolCall,
+    cancel_rx: Option<watch::Receiver<bool>>,
+) -> AgentToolResult {
+    local_tools::execute_tool_call(
+        runtime_state.as_ref(),
+        &tab_id,
+        &project_root,
+        call,
+        cancel_rx,
     )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn unsupported_executor_returns_error_result() {
-        let result = execute_cli_tool(AgentToolCall {
-            tool_name: "read_file".to_string(),
-            call_id: "call-1".to_string(),
-            arguments: r#"{"path":"src/main.rs"}"#.to_string(),
-        });
+    #[tokio::test]
+    async fn unsupported_executor_returns_error_result() {
+        let result = execute_cli_tool(
+            Arc::new(AgentRuntimeState::default()),
+            "tab-1".to_string(),
+            ".".to_string(),
+            AgentToolCall {
+                tool_name: "write_file".to_string(),
+                call_id: "call-1".to_string(),
+                arguments: r#"{"path":"src/main.rs","content":"x"}"#.to_string(),
+            },
+            None,
+        )
+        .await;
 
         assert!(result.is_error);
-        assert_eq!(result.tool_name, "read_file");
+        assert_eq!(result.tool_name, "write_file");
         assert_eq!(result.call_id, "call-1");
-        assert_eq!(
-            result.content,
-            json!({
-                "error": "Standalone agent-cli does not support tool 'read_file' in this runtime."
-            })
-        );
-        assert_eq!(
-            result.preview,
-            "Standalone agent-cli does not support tool 'read_file' in this runtime."
-        );
+        assert!(result.preview.contains("does not support tool"));
     }
 }
