@@ -19,19 +19,12 @@ use agent_core::{
 };
 use args::{Args, Command, ConfigSubcommand, RunMode};
 use clap::Parser;
+use config_model::ResolvedConfig;
 use output::{HumanEventSink, JsonlEventSink};
 
 fn emit_cli_failure(sink: &dyn EventSink, tab_id: &str, code: &str, message: &str) {
     emit_error(sink, tab_id, code, message.to_string());
     emit_agent_complete(sink, tab_id, "error");
-}
-
-fn default_base_url(provider: &str) -> Option<&'static str> {
-    match provider {
-        "deepseek" => Some("https://api.deepseek.com/v1"),
-        "minimax" => Some("https://api.minimax.chat/v1"),
-        _ => None,
-    }
 }
 
 fn completion_outcome(suspended: bool) -> &'static str {
@@ -42,18 +35,24 @@ fn completion_outcome(suspended: bool) -> &'static str {
     }
 }
 
-fn build_request(args: &Args, prompt: String, local_session_id: &str) -> AgentTurnDescriptor {
+fn build_request(
+    project_path: &str,
+    tab_id: &str,
+    model: &str,
+    prompt: String,
+    local_session_id: &str,
+) -> AgentTurnDescriptor {
     let mut request = AgentTurnDescriptor {
-        project_path: args.project_path.clone(),
+        project_path: project_path.to_string(),
         prompt,
-        tab_id: args.tab_id.clone(),
-        model: args.model.clone(),
+        tab_id: tab_id.to_string(),
+        model: Some(model.to_string()),
         local_session_id: Some(local_session_id.to_string()),
         previous_response_id: None,
         turn_profile: None,
     };
 
-    // MVP-1 keeps fallback tool executor; force suggestion-only to avoid required tool calls.
+    // CLI keeps fallback tool executor; steer turns away from mandatory tool usage.
     request.turn_profile = Some(AgentTurnProfile {
         task_kind: AgentTaskKind::SuggestionOnly,
         response_mode: AgentResponseMode::SuggestionOnly,
@@ -61,6 +60,72 @@ fn build_request(args: &Args, prompt: String, local_session_id: &str) -> AgentTu
     });
 
     request
+}
+
+fn static_provider_for(resolved: &ResolvedConfig) -> StaticConfigProvider {
+    let mut config = AgentRuntimeConfig::default_local_agent();
+    config.provider = resolved.provider.clone();
+    config.model = resolved.model.clone();
+    config.api_key = Some(resolved.api_key.clone());
+    config.base_url = resolved.base_url.clone();
+
+    StaticConfigProvider {
+        config,
+        config_dir: std::env::temp_dir().join("agent-runtime"),
+    }
+}
+
+fn resolve_effective_config(args: &Args, allow_wizard: bool) -> Result<ResolvedConfig, String> {
+    let path = config_store::default_config_path()?;
+    let file_cfg = match config_store::load_config(&path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("config warning: {}", err);
+            None
+        }
+    };
+
+    let cli_raw = config_resolver::RawConfig {
+        provider: args.provider.clone(),
+        model: args.model.clone(),
+        api_key: args.api_key.clone(),
+        base_url: args.base_url.clone(),
+        output: args.output.clone(),
+    };
+
+    let env_raw = config_resolver::RawConfig {
+        provider: std::env::var("AGENT_PROVIDER").ok(),
+        model: std::env::var("AGENT_MODEL").ok(),
+        api_key: std::env::var("AGENT_API_KEY").ok(),
+        base_url: std::env::var("AGENT_BASE_URL").ok(),
+        output: std::env::var("AGENT_OUTPUT").ok(),
+    };
+
+    let mut merged = config_resolver::merge_sources(
+        &cli_raw,
+        &env_raw,
+        &config_resolver::file_to_raw(file_cfg.clone()),
+    );
+
+    if !config_resolver::detect_missing(&merged).is_empty() {
+        if !allow_wizard {
+            return Err(
+                "required config missing: provider/model/api_key. Run `agent-runtime config init`"
+                    .to_string(),
+            );
+        }
+
+        let mut io = config_wizard::StdioWizardIo;
+        let wizard_cfg = config_wizard::run_wizard(&mut io, file_cfg.as_ref())?;
+        config_store::save_config_atomic(&path, &wizard_cfg)?;
+        merged = config_resolver::merge_sources(
+            &cli_raw,
+            &env_raw,
+            &config_resolver::file_to_raw(Some(wizard_cfg)),
+        );
+    }
+
+    config_resolver::finalize(merged)
 }
 
 #[cfg(test)]
@@ -142,21 +207,17 @@ mod tests {
     }
 
     #[test]
-    fn default_base_url_prefers_chat_completions_endpoints() {
-        assert_eq!(
-            default_base_url("minimax"),
-            Some("https://api.minimax.chat/v1")
-        );
-        assert_eq!(
-            default_base_url("deepseek"),
-            Some("https://api.deepseek.com/v1")
-        );
+    fn startup_requests_wizard_when_required_fields_are_missing() {
+        let merged = config_resolver::RawConfig::default();
+        let missing = config_resolver::detect_missing(&merged);
+        assert_eq!(missing.len(), 3);
     }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
+
     if let RunMode::Command = args.run_mode() {
         if let Some(Command::Config { action }) = &args.command {
             let mut io = config_wizard::StdioWizardIo;
@@ -171,29 +232,20 @@ async fn main() -> ExitCode {
                 }
             }
         }
+
         eprintln!("agent-runtime error: unsupported command");
         return ExitCode::FAILURE;
     }
 
-    let provider = args
-        .provider
-        .clone()
-        .unwrap_or_else(|| "minimax".to_string())
-        .trim()
-        .to_ascii_lowercase();
-
-    let Some(default_url) = default_base_url(&provider) else {
-        let message = format!(
-            "Unsupported provider '{}'. Supported providers: minimax, deepseek.",
-            args.provider.as_deref().unwrap_or("<unset>")
-        );
-        let fallback_sink = JsonlEventSink::stdout();
-        emit_cli_failure(&fallback_sink, &args.tab_id, "unsupported_provider", &message);
-        eprintln!("agent-runtime error: {message}");
-        return ExitCode::FAILURE;
+    let resolved = match resolve_effective_config(&args, true) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("agent-runtime error: {}", err);
+            return ExitCode::FAILURE;
+        }
     };
 
-    let output_mode = match args::parse_output_mode(args.output.as_deref().unwrap_or("human")) {
+    let output_mode = match args::parse_output_mode(&resolved.output) {
         Ok(mode) => mode,
         Err(err) => {
             eprintln!("agent-runtime error: {}", err);
@@ -206,22 +258,6 @@ async fn main() -> ExitCode {
         args::OutputMode::Jsonl => Arc::new(JsonlEventSink::stdout()),
     };
 
-    let mut config = AgentRuntimeConfig::default_local_agent();
-    config.provider = provider;
-    config.model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| "MiniMax-M1".to_string());
-    config.api_key = args.api_key.clone();
-    config.base_url = args
-        .base_url
-        .clone()
-        .unwrap_or_else(|| default_url.to_string());
-
-    let config_provider = Arc::new(StaticConfigProvider {
-        config,
-        config_dir: std::env::temp_dir().join("agent-runtime"),
-    });
     let runtime_state = Arc::new(AgentRuntimeState::default());
 
     let tool_executor: ToolExecutorFn = Arc::new(|call, _cancel_rx| {
@@ -233,7 +269,14 @@ async fn main() -> ExitCode {
     match args.run_mode() {
         RunMode::SingleTurn => {
             let prompt = args.prompt.clone().unwrap_or_default();
-            let request = build_request(&args, prompt, &local_session_id);
+            let request = build_request(
+                &args.project_path,
+                &args.tab_id,
+                &resolved.model,
+                prompt,
+                &local_session_id,
+            );
+
             if turn_runner::request_requires_tools(&request) {
                 let message = "This prompt requires tool execution, but agent-cli currently uses a fallback tool executor. Run from desktop runtime or use a suggestion-only prompt.".to_string();
                 emit_cli_failure(
@@ -246,9 +289,10 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
 
+            let config_provider = static_provider_for(&resolved);
             match turn_runner::run_turn(
                 sink.as_ref(),
-                config_provider.as_ref(),
+                &config_provider,
                 runtime_state.as_ref(),
                 &request,
                 Arc::clone(&tool_executor),
@@ -276,7 +320,6 @@ async fn main() -> ExitCode {
             let repl_args = args.clone();
             let repl_session_id = local_session_id.clone();
             let repl_sink = Arc::clone(&sink);
-            let repl_config_provider = Arc::clone(&config_provider);
             let repl_runtime_state = Arc::clone(&runtime_state);
             let repl_tool_executor = Arc::clone(&tool_executor);
 
@@ -301,11 +344,30 @@ async fn main() -> ExitCode {
                     repl_commands::ReplCommand::None => {}
                 }
 
-                let request = build_request(&repl_args, prompt, &repl_session_id);
+                let resolved = match resolve_effective_config(&repl_args, true) {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        emit_cli_failure(
+                            repl_sink.as_ref(),
+                            &repl_args.tab_id,
+                            "config_resolve_failed",
+                            &err,
+                        );
+                        return Box::pin(async { Ok(()) });
+                    }
+                };
+
+                let request = build_request(
+                    &repl_args.project_path,
+                    &repl_args.tab_id,
+                    &resolved.model,
+                    prompt,
+                    &repl_session_id,
+                );
                 let sink = Arc::clone(&repl_sink);
-                let config_provider = Arc::clone(&repl_config_provider);
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tool_executor = Arc::clone(&repl_tool_executor);
+                let config_provider = static_provider_for(&resolved);
 
                 Box::pin(async move {
                     if turn_runner::request_requires_tools(&request) {
@@ -321,7 +383,7 @@ async fn main() -> ExitCode {
 
                     match turn_runner::run_turn(
                         sink.as_ref(),
-                        config_provider.as_ref(),
+                        &config_provider,
                         runtime_state.as_ref(),
                         &request,
                         tool_executor,
