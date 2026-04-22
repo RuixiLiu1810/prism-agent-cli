@@ -1,12 +1,14 @@
 mod args;
+mod command_router;
 mod config_commands;
 mod config_model;
 mod config_resolver;
 mod config_store;
 mod config_wizard;
+mod header_renderer;
 mod output;
 mod repl;
-mod repl_commands;
+mod status_snapshot;
 mod tool_executor;
 mod turn_runner;
 
@@ -17,10 +19,11 @@ use agent_core::{
     AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
     ToolExecutorFn,
 };
-use args::{Args, Command, ConfigSubcommand, RunMode};
+use args::{Args, Command, ConfigSubcommand, OutputMode, RunMode};
 use clap::Parser;
 use config_model::ResolvedConfig;
 use output::{HumanEventSink, JsonlEventSink};
+use status_snapshot::CliStatusSnapshot;
 
 fn emit_cli_failure(sink: &dyn EventSink, tab_id: &str, code: &str, message: &str) {
     emit_error(sink, tab_id, code, message.to_string());
@@ -73,6 +76,111 @@ fn static_provider_for(resolved: &ResolvedConfig) -> StaticConfigProvider {
         config,
         config_dir: std::env::temp_dir().join("agent-runtime"),
     }
+}
+
+fn render_header(
+    output_mode: OutputMode,
+    args: &Args,
+    resolved: &ResolvedConfig,
+    local_session_id: &str,
+) -> Result<(), String> {
+    if output_mode != OutputMode::Human {
+        return Ok(());
+    }
+
+    let snapshot = CliStatusSnapshot::collect(
+        &resolved.provider,
+        &resolved.model,
+        &args.project_path,
+        local_session_id,
+        &resolved.output,
+    );
+
+    let mut stdout = std::io::stdout();
+    header_renderer::print_header(&mut stdout, &snapshot)
+}
+
+fn clear_and_render_header(
+    output_mode: OutputMode,
+    args: &Args,
+    resolved: &ResolvedConfig,
+    local_session_id: &str,
+) -> Result<(), String> {
+    if output_mode != OutputMode::Human {
+        return Ok(());
+    }
+
+    let mut stdout = std::io::stdout();
+    header_renderer::clear_screen(&mut stdout)?;
+    render_header(output_mode, args, resolved, local_session_id)
+}
+
+fn render_help_panel() {
+    println!(
+        "Agent CLI commands:
+  /help      Show quick help
+  /commands  Show the full command list
+  /config    Edit local config interactively
+  /model     Show current model
+  /model X   Persist model X to local config file
+  /status    Show current runtime status
+  /clear     Clear the screen and redraw header
+  exit|quit  Leave REPL"
+    );
+}
+
+fn render_commands_panel() {
+    println!(
+        "Supported commands:
+  /help
+  /commands
+  /config
+  /model
+  /model <model-name>
+  /status
+  /clear"
+    );
+}
+
+fn render_status_inline(snapshot: &CliStatusSnapshot) {
+    let dirty_suffix = if snapshot.git_dirty { "*" } else { "" };
+    println!(
+        "provider/model: {}/{} | output: {} | session: {}",
+        snapshot.provider, snapshot.model, snapshot.output_mode, snapshot.session_id
+    );
+    println!(
+        "project: {} | git: {}{}",
+        snapshot.project_path, snapshot.git_branch, dirty_suffix
+    );
+}
+
+fn persist_model_to_local_config(model: &str) -> Result<String, String> {
+    let path = config_store::default_config_path()?;
+    let mut cfg = config_store::load_config(&path)?.unwrap_or_default();
+    cfg.model = Some(model.trim().to_string());
+    config_store::save_config_atomic(&path, &cfg)?;
+    Ok(format!(
+        "Model updated in local config: {} -> {}",
+        model.trim(),
+        path.display()
+    ))
+}
+
+fn model_override_hint(args: &Args) -> Option<&'static str> {
+    if args
+        .model
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Some("Note: --model is set in CLI args and still takes precedence.");
+    }
+    if std::env::var("AGENT_MODEL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Some("Note: AGENT_MODEL is set and still takes precedence.");
+    }
+    None
 }
 
 fn resolve_effective_config(args: &Args, allow_wizard: bool) -> Result<ResolvedConfig, String> {
@@ -260,9 +368,8 @@ async fn main() -> ExitCode {
 
     let runtime_state = Arc::new(AgentRuntimeState::default());
 
-    let tool_executor: ToolExecutorFn = Arc::new(|call, _cancel_rx| {
-        Box::pin(async move { tool_executor::execute_cli_tool(call) })
-    });
+    let tool_executor: ToolExecutorFn =
+        Arc::new(|call, _cancel_rx| Box::pin(async move { tool_executor::execute_cli_tool(call) }));
 
     let local_session_id = format!("{}-session", args.tab_id);
 
@@ -315,6 +422,10 @@ async fn main() -> ExitCode {
             }
         }
         RunMode::Repl => {
+            if let Err(err) = render_header(output_mode, &args, &resolved, &local_session_id) {
+                eprintln!("agent-runtime warning: {}", err);
+            }
+
             let mut stdout = std::io::stdout();
             let reader = repl::stdin_reader();
             let repl_args = args.clone();
@@ -322,26 +433,111 @@ async fn main() -> ExitCode {
             let repl_sink = Arc::clone(&sink);
             let repl_runtime_state = Arc::clone(&runtime_state);
             let repl_tool_executor = Arc::clone(&tool_executor);
+            let repl_output_mode = output_mode;
 
             let res = repl::run_repl(reader, &mut stdout, move |prompt| {
-                match repl_commands::parse_repl_command(&prompt) {
-                    repl_commands::ReplCommand::Config => {
+                match command_router::parse_repl_command(&prompt) {
+                    command_router::ReplCommand::Config => {
                         let mut io = config_wizard::StdioWizardIo;
-                        let _ = config_commands::execute_config_command(
-                            &ConfigSubcommand::Edit,
-                            &mut io,
-                        );
+                        match config_commands::execute_config_command(&ConfigSubcommand::Edit, &mut io)
+                        {
+                            Ok(message) => {
+                                println!("{}", message);
+                                match resolve_effective_config(&repl_args, false) {
+                                    Ok(updated) => {
+                                        let _ = render_header(
+                                            repl_output_mode,
+                                            &repl_args,
+                                            &updated,
+                                            &repl_session_id,
+                                        );
+                                    }
+                                    Err(err) => eprintln!("agent-runtime error: {}", err),
+                                }
+                            }
+                            Err(err) => eprintln!("agent-runtime error: {}", err),
+                        }
                         return Box::pin(async { Ok(()) });
                     }
-                    repl_commands::ReplCommand::Help => {
-                        println!("Commands: /config, /help, exit, quit");
+                    command_router::ReplCommand::Help => {
+                        render_help_panel();
                         return Box::pin(async { Ok(()) });
                     }
-                    repl_commands::ReplCommand::Unknown(cmd) => {
-                        println!("Unknown command: {}", cmd);
+                    command_router::ReplCommand::Commands => {
+                        render_commands_panel();
                         return Box::pin(async { Ok(()) });
                     }
-                    repl_commands::ReplCommand::None => {}
+                    command_router::ReplCommand::Status => {
+                        match resolve_effective_config(&repl_args, false) {
+                            Ok(current) => {
+                                let snapshot = CliStatusSnapshot::collect(
+                                    &current.provider,
+                                    &current.model,
+                                    &repl_args.project_path,
+                                    &repl_session_id,
+                                    &current.output,
+                                );
+                                render_status_inline(&snapshot);
+                            }
+                            Err(err) => eprintln!("agent-runtime error: {}", err),
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::Clear => {
+                        match resolve_effective_config(&repl_args, false) {
+                            Ok(current) => {
+                                if let Err(err) = clear_and_render_header(
+                                    repl_output_mode,
+                                    &repl_args,
+                                    &current,
+                                    &repl_session_id,
+                                ) {
+                                    eprintln!("agent-runtime error: {}", err);
+                                }
+                            }
+                            Err(err) => eprintln!("agent-runtime error: {}", err),
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::ModelShow => {
+                        match resolve_effective_config(&repl_args, false) {
+                            Ok(current) => println!("Current model: {}", current.model),
+                            Err(err) => eprintln!("agent-runtime error: {}", err),
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::ModelSet(model) => {
+                        match persist_model_to_local_config(&model) {
+                            Ok(message) => {
+                                println!("{}", message);
+                                if let Some(hint) = model_override_hint(&repl_args) {
+                                    println!("{}", hint);
+                                }
+                                match resolve_effective_config(&repl_args, false) {
+                                    Ok(current) => {
+                                        let _ = render_header(
+                                            repl_output_mode,
+                                            &repl_args,
+                                            &current,
+                                            &repl_session_id,
+                                        );
+                                    }
+                                    Err(err) => eprintln!("agent-runtime error: {}", err),
+                                }
+                            }
+                            Err(err) => eprintln!("agent-runtime error: {}", err),
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::Unknown { raw, suggestion } => {
+                        if let Some(suggestion) = suggestion {
+                            println!("Unknown command: {}. Did you mean {}?", raw, suggestion);
+                        } else {
+                            println!("Unknown command: {}", raw);
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
+                    command_router::ReplCommand::None => {}
                 }
 
                 let resolved = match resolve_effective_config(&repl_args, true) {
@@ -368,6 +564,8 @@ async fn main() -> ExitCode {
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tool_executor = Arc::clone(&repl_tool_executor);
                 let config_provider = static_provider_for(&resolved);
+                let args_for_turn = repl_args.clone();
+                let session_id_for_turn = repl_session_id.clone();
 
                 Box::pin(async move {
                     if turn_runner::request_requires_tools(&request) {
@@ -396,6 +594,14 @@ async fn main() -> ExitCode {
                                 &request.tab_id,
                                 completion_outcome(outcome.suspended),
                             );
+                            if let Ok(current) = resolve_effective_config(&args_for_turn, false) {
+                                let _ = render_header(
+                                    repl_output_mode,
+                                    &args_for_turn,
+                                    &current,
+                                    &session_id_for_turn,
+                                );
+                            }
                             Ok(())
                         }
                         Err(error) => {
@@ -405,6 +611,14 @@ async fn main() -> ExitCode {
                                 "turn_loop_failed",
                                 &error,
                             );
+                            if let Ok(current) = resolve_effective_config(&args_for_turn, false) {
+                                let _ = render_header(
+                                    repl_output_mode,
+                                    &args_for_turn,
+                                    &current,
+                                    &session_id_for_turn,
+                                );
+                            }
                             Ok(())
                         }
                     }
