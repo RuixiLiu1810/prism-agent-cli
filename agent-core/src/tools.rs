@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::provider::AgentTaskKind;
 
@@ -1182,8 +1182,8 @@ pub fn check_tool_call_policy(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentToolSpec, build_default_tool_specs, default_tool_specs, parse_tool_arguments,
-        to_chat_completions_tool_schema, to_openai_tool_schema, tool_contract,
+        build_default_tool_specs, default_tool_specs, parse_tool_arguments,
+        to_chat_completions_tool_schema, to_openai_tool_schema, tool_contract, AgentToolSpec,
     };
     use serde_json::json;
 
@@ -1228,25 +1228,19 @@ mod tests {
         let deepseek = to_chat_completions_tool_schema(&tool, "deepseek");
         let openai = to_chat_completions_tool_schema(&tool, "openai");
 
-        assert!(
-            minimax["function"]["parameters"]
-                .get("additionalProperties")
-                .is_none()
-        );
-        assert!(
-            deepseek["function"]["parameters"]
-                .get("additionalProperties")
-                .is_none()
-        );
+        assert!(minimax["function"]["parameters"]
+            .get("additionalProperties")
+            .is_none());
+        assert!(deepseek["function"]["parameters"]
+            .get("additionalProperties")
+            .is_none());
         assert_eq!(
             openai["function"]["parameters"]["additionalProperties"],
             json!(false)
         );
-        assert!(
-            minimax["function"]["parameters"]["properties"]["payload"]
-                .get("additionalProperties")
-                .is_none()
-        );
+        assert!(minimax["function"]["parameters"]["properties"]["payload"]
+            .get("additionalProperties")
+            .is_none());
     }
 
     #[test]

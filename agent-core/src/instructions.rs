@@ -905,10 +905,8 @@ mod tests {
         assert!(instructions.contains(
             "Recent objective: Compare the attached papers for hydrophobic experiments."
         ));
-        assert!(
-            !instructions
-                .contains("Active objective: Which paper mentions hydrophobic experiments?")
-        );
+        assert!(!instructions
+            .contains("Active objective: Which paper mentions hydrophobic experiments?"));
     }
 
     #[test]

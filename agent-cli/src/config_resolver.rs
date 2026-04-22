@@ -170,7 +170,14 @@ mod tests {
     #[test]
     fn detect_missing_fields() {
         let missing = detect_missing(&RawConfig::default());
-        assert_eq!(missing, vec![MissingField::Provider, MissingField::Model, MissingField::ApiKey]);
+        assert_eq!(
+            missing,
+            vec![
+                MissingField::Provider,
+                MissingField::Model,
+                MissingField::ApiKey
+            ]
+        );
     }
 
     #[test]

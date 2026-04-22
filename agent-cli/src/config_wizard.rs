@@ -34,7 +34,10 @@ impl WizardIo for StdioWizardIo {
     }
 }
 
-pub fn run_wizard(io: &mut dyn WizardIo, existing: Option<&StoredConfig>) -> Result<StoredConfig, String> {
+pub fn run_wizard(
+    io: &mut dyn WizardIo,
+    existing: Option<&StoredConfig>,
+) -> Result<StoredConfig, String> {
     io.print_line("")?;
     io.print_line("========================================")?;
     io.print_line(" Agent Runtime Setup Wizard")?;
@@ -216,10 +219,7 @@ mod tests {
         assert_eq!(cfg.provider.as_deref(), Some("minimax"));
         assert_eq!(cfg.model.as_deref(), Some("MiniMax-M1"));
         assert_eq!(cfg.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(
-            cfg.base_url.as_deref(),
-            Some("https://api.minimax.chat/v1")
-        );
+        assert_eq!(cfg.base_url.as_deref(), Some("https://api.minimax.chat/v1"));
     }
 
     #[test]
@@ -241,8 +241,8 @@ mod tests {
             "save".to_string(),
         ]);
 
-        let cfg = run_wizard(&mut io, Some(&existing))
-            .unwrap_or_else(|e| panic!("wizard failed: {e}"));
+        let cfg =
+            run_wizard(&mut io, Some(&existing)).unwrap_or_else(|e| panic!("wizard failed: {e}"));
         assert_eq!(cfg, existing);
     }
 }

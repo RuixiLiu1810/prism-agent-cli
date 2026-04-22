@@ -7,9 +7,7 @@ pub fn execute_cli_tool(call: AgentToolCall) -> AgentToolResult {
     agent_core::tools::error_result(
         &tool_name,
         &call_id,
-        format!(
-            "Standalone agent-cli does not support tool '{tool_name}' in this runtime."
-        ),
+        format!("Standalone agent-cli does not support tool '{tool_name}' in this runtime."),
     )
 }
 
