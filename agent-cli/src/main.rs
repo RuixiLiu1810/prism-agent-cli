@@ -11,6 +11,7 @@ mod output;
 mod repl;
 mod status_snapshot;
 mod tool_executor;
+mod tui;
 mod turn_runner;
 
 use std::{process::ExitCode, sync::Arc};
