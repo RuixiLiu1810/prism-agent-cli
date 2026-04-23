@@ -1,30 +1,118 @@
-use std::io::Write;
-use std::sync::Arc;
-use std::time::Duration;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 use agent_core::{
-    emit_agent_complete, emit_error, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState,
-    AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
-    ToolExecutorFn,
-};
-use crossterm::{
-    cursor,
-    event::{self, Event},
-    execute, queue,
-    style::Print,
-    terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    emit_agent_complete, emit_error, AgentCompletePayload, AgentErrorEvent, AgentEventEnvelope,
+    AgentEventPayload, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState, AgentTaskKind,
+    AgentToolCallEvent, AgentToolResultEvent, AgentTurnDescriptor, AgentTurnProfile, EventSink,
+    StaticConfigProvider, ToolExecutorFn,
 };
 
 use crate::args::{Args, ToolMode};
+use crate::command_router::{self, ReplCommand};
 use crate::config_model::ResolvedConfig;
+use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
 use crate::{tool_executor, turn_runner};
 
-use super::event_bridge::{map_payload, ChannelEventSink, TuiRuntimeEvent};
-use super::input::{apply_input_action, to_action, UiAction};
-use super::renderer::render_frame;
-use super::types::ViewUpdate;
-use super::view_model::TuiViewModel;
+fn write_line<W: Write>(writer: &mut W, line: &str) {
+    let _ = writer.write_all(line.as_bytes());
+    let _ = writer.flush();
+}
+
+struct StreamingTuiEventSink {
+    writer: Mutex<Vec<u8>>,
+    mirror_stdout: bool,
+}
+
+impl StreamingTuiEventSink {
+    fn stdout() -> Self {
+        Self {
+            writer: Mutex::new(Vec::new()),
+            mirror_stdout: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            writer: Mutex::new(Vec::new()),
+            mirror_stdout: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_test_output(&self) -> String {
+        let mut guard = match self.writer.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let out = String::from_utf8_lossy(&guard).to_string();
+        guard.clear();
+        out
+    }
+
+    fn write_human(&self, line: &str) {
+        if let Ok(mut guard) = self.writer.lock() {
+            write_line(&mut *guard, line);
+        }
+        if self.mirror_stdout {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            write_line(&mut handle, line);
+        }
+    }
+
+    fn render_tool_call(call: &AgentToolCallEvent) -> String {
+        format!("\n[tool] {} ({})\n", call.tool_name, call.call_id)
+    }
+
+    fn render_tool_result(result: &AgentToolResultEvent) -> String {
+        if result
+            .content
+            .get("approvalRequired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return format!(
+                "\n[semantic] {}\n[detail] run /approve shell once or /approve shell session\n",
+                result.preview
+            );
+        }
+
+        format!(
+            "\n[semantic] {}\n[detail] tool={} call_id={} is_error={}\n",
+            result.preview, result.tool_name, result.call_id, result.is_error
+        )
+    }
+
+    fn render_error(error: &AgentErrorEvent) -> String {
+        format!("\n[error:{}] {}\n", error.code, error.message)
+    }
+}
+
+impl EventSink for StreamingTuiEventSink {
+    fn emit_event(&self, envelope: &AgentEventEnvelope) {
+        let line = match &envelope.payload {
+            AgentEventPayload::Status(status) => {
+                format!("\n[{}] {}\n", status.stage, status.message)
+            }
+            AgentEventPayload::MessageDelta(delta) => delta.delta.clone(),
+            AgentEventPayload::ToolCall(call) => Self::render_tool_call(call),
+            AgentEventPayload::ToolResult(result) => Self::render_tool_result(result),
+            AgentEventPayload::Error(error) => Self::render_error(error),
+            _ => String::new(),
+        };
+
+        if !line.is_empty() {
+            self.write_human(&line);
+        }
+    }
+
+    fn emit_complete(&self, payload: &AgentCompletePayload) {
+        self.write_human(&format!("\n[turn:{}]\n", payload.outcome));
+    }
+}
 
 fn build_request(
     project_path: &str,
@@ -68,58 +156,28 @@ fn static_provider_for(resolved: &ResolvedConfig) -> StaticConfigProvider {
     }
 }
 
-fn draw_frame(vm: &TuiViewModel, args: &Args, resolved: &ResolvedConfig) -> Result<(), String> {
-    let snapshot = CliStatusSnapshot::collect(
-        &resolved.provider,
-        &resolved.model,
-        &args.project_path,
-        &vm.session_id,
-        &resolved.output,
+fn render_help_panel() {
+    println!(
+        "TUI (streaming) commands:\n  /help\n  /commands\n  /status\n  /approve shell once|session|deny\n  exit|quit"
     );
-    let (width, height) = terminal::size().map_err(|e| format!("terminal size failed: {e}"))?;
-    let lines = render_frame(&snapshot, vm, width, height);
-
-    let mut stdout = std::io::stdout();
-    execute!(
-        stdout,
-        cursor::MoveTo(0, 0),
-        terminal::Clear(terminal::ClearType::All)
-    )
-    .map_err(|e| format!("clear frame failed: {e}"))?;
-
-    for (index, line) in lines.iter().enumerate() {
-        queue!(stdout, Print(line)).map_err(|e| format!("draw line failed: {e}"))?;
-        if index + 1 < lines.len() {
-            queue!(stdout, Print("\r\n")).map_err(|e| format!("draw newline failed: {e}"))?;
-        }
-    }
-    stdout
-        .flush()
-        .map_err(|e| format!("flush frame failed: {e}"))?;
-    Ok(())
 }
 
-fn setup_terminal() -> Result<(), String> {
-    let mut stdout = std::io::stdout();
-    enable_raw_mode().map_err(|e| format!("enable_raw_mode failed: {e}"))?;
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| format!("enter alt screen failed: {e}"))?;
-    Ok(())
+fn render_commands_panel() {
+    println!(
+        "Supported commands:\n  /help\n  /commands\n  /status\n  /approve shell once|session|deny"
+    );
 }
 
-fn cleanup_terminal() -> Result<(), String> {
-    let mut errors = Vec::new();
-    if let Err(err) = execute!(std::io::stdout(), LeaveAlternateScreen) {
-        errors.push(format!("leave alt screen failed: {err}"));
-    }
-    if let Err(err) = disable_raw_mode() {
-        errors.push(format!("disable_raw_mode failed: {err}"));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+fn render_status_inline(snapshot: &CliStatusSnapshot) {
+    let dirty_suffix = if snapshot.git_dirty { "*" } else { "" };
+    println!(
+        "provider/model: {}/{} | output: {} | session: {}",
+        snapshot.provider, snapshot.model, snapshot.output_mode, snapshot.session_id
+    );
+    println!(
+        "project: {} | git: {}{}",
+        snapshot.project_path, snapshot.git_branch, dirty_suffix
+    );
 }
 
 pub async fn run_tui_shell(
@@ -128,22 +186,10 @@ pub async fn run_tui_shell(
     runtime_state: Arc<AgentRuntimeState>,
     tool_mode: ToolMode,
 ) -> Result<(), String> {
-    setup_terminal().map_err(|err| format!("tui setup failed: {err}"))?;
-    let loop_result = run_tui_loop(args, resolved, runtime_state, tool_mode).await;
-    cleanup_terminal().map_err(|err| format!("tui cleanup failed: {err}"))?;
-    loop_result
-}
+    println!("[tui] streaming mode (non-fullscreen)");
 
-async fn run_tui_loop(
-    args: Args,
-    resolved: ResolvedConfig,
-    runtime_state: Arc<AgentRuntimeState>,
-    tool_mode: ToolMode,
-) -> Result<(), String> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TuiRuntimeEvent>();
-    let sink: Arc<dyn EventSink> = Arc::new(ChannelEventSink::new(tx));
-    let mut vm = TuiViewModel::new(format!("{}-session", args.tab_id));
-    let mut active_turn: Option<tokio::task::JoinHandle<()>> = None;
+    let sink: Arc<dyn EventSink> = Arc::new(StreamingTuiEventSink::stdout());
+    let local_session_id = format!("{}-session", args.tab_id);
 
     let tool_runtime_state = Arc::clone(&runtime_state);
     let tool_tab_id = args.tab_id.clone();
@@ -158,148 +204,197 @@ async fn run_tui_loop(
         })
     });
 
-    loop {
-        while let Ok(runtime_event) = rx.try_recv() {
-            match runtime_event {
-                TuiRuntimeEvent::AgentEvent(envelope) => {
-                    if let Some(update) = map_payload(&envelope.payload) {
-                        vm.apply_update(update);
+    let mut stdout = io::stdout();
+    let reader = repl::stdin_reader();
+    let repl_args = args.clone();
+    let repl_resolved = resolved.clone();
+    let repl_runtime_state = Arc::clone(&runtime_state);
+    let repl_sink = Arc::clone(&sink);
+    let repl_tool_executor = Arc::clone(&tool_executor);
+
+    repl::run_repl(reader, &mut stdout, move |prompt| {
+        match command_router::parse_repl_command(&prompt) {
+            ReplCommand::Help => {
+                render_help_panel();
+                return Box::pin(async { Ok(()) });
+            }
+            ReplCommand::Commands => {
+                render_commands_panel();
+                return Box::pin(async { Ok(()) });
+            }
+            ReplCommand::Status => {
+                let snapshot = CliStatusSnapshot::collect(
+                    &repl_resolved.provider,
+                    &repl_resolved.model,
+                    &repl_args.project_path,
+                    &local_session_id,
+                    &repl_resolved.output,
+                );
+                render_status_inline(&snapshot);
+                return Box::pin(async { Ok(()) });
+            }
+            ReplCommand::ApproveShellOnce => {
+                let runtime_state = Arc::clone(&repl_runtime_state);
+                let tab_id = repl_args.tab_id.clone();
+                return Box::pin(async move {
+                    match runtime_state
+                        .set_tool_approval(&tab_id, "run_shell_command", "allow_once")
+                        .await
+                    {
+                        Ok(()) => println!("Approved shell for one command in this session."),
+                        Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
-                }
-                TuiRuntimeEvent::AgentComplete(done) => {
-                    vm.apply_update(ViewUpdate::TurnOutcome(done.outcome));
-                }
+                    Ok(())
+                });
             }
-        }
-
-        if let Some(handle) = &active_turn {
-            if handle.is_finished() {
-                if let Some(done) = active_turn.take() {
-                    let _ = done.await;
-                }
-            }
-        }
-
-        draw_frame(&vm, &args, &resolved)?;
-
-        if event::poll(Duration::from_millis(16)).map_err(|e| format!("poll failed: {e}"))? {
-            let Event::Key(key) = event::read().map_err(|e| format!("read failed: {e}"))? else {
-                continue;
-            };
-            let action = to_action(key).unwrap_or(UiAction::Noop);
-            match action {
-                UiAction::Exit => break,
-                UiAction::ClearScreen => {
-                    vm.lines.clear();
-                    vm.selected_line = 0;
-                    vm.focus = super::types::UiFocus::Input;
-                }
-                _ => {
-                    if let Some(prompt) = apply_input_action(&mut vm, action) {
-                        if active_turn.is_some() {
-                            vm.apply_update(ViewUpdate::Semantic {
-                                text: "Agent is still working on the previous turn".to_string(),
-                                detail: "wait for completion before sending another prompt"
-                                    .to_string(),
-                            });
-                            continue;
-                        }
-
-                        vm.push_user_prompt(prompt.clone());
-                        let request = build_request(
-                            &args.project_path,
-                            &args.tab_id,
-                            &resolved.model,
-                            prompt,
-                            &vm.session_id,
-                            tool_mode,
-                        );
-                        let sink_for_turn = Arc::clone(&sink);
-                        let runtime_state_for_turn = Arc::clone(&runtime_state);
-                        let tool_executor_for_turn = Arc::clone(&tool_executor);
-                        let provider = static_provider_for(&resolved);
-
-                        active_turn = Some(tokio::spawn(async move {
-                            if tool_mode == ToolMode::Off
-                                && turn_runner::request_requires_tools(&request)
-                            {
-                                emit_error(
-                                    sink_for_turn.as_ref(),
-                                    &request.tab_id,
-                                    "tool_backend_unavailable",
-                                    "This prompt requires tool execution, but tools are off."
-                                        .to_string(),
-                                );
-                                emit_agent_complete(sink_for_turn.as_ref(), &request.tab_id, "error");
-                                return;
-                            }
-
-                            match turn_runner::run_turn(
-                                sink_for_turn.as_ref(),
-                                &provider,
-                                runtime_state_for_turn.as_ref(),
-                                &request,
-                                tool_executor_for_turn,
-                            )
-                            .await
-                            {
-                                Ok(outcome) => {
-                                    let outcome_str = if outcome.suspended {
-                                        "suspended"
-                                    } else {
-                                        "completed"
-                                    };
-                                    emit_agent_complete(
-                                        sink_for_turn.as_ref(),
-                                        &request.tab_id,
-                                        outcome_str,
-                                    );
-                                }
-                                Err(error) => {
-                                    emit_error(
-                                        sink_for_turn.as_ref(),
-                                        &request.tab_id,
-                                        "turn_loop_failed",
-                                        error,
-                                    );
-                                    emit_agent_complete(
-                                        sink_for_turn.as_ref(),
-                                        &request.tab_id,
-                                        "error",
-                                    );
-                                }
-                            }
-                        }));
+            ReplCommand::ApproveShellSession => {
+                let runtime_state = Arc::clone(&repl_runtime_state);
+                let tab_id = repl_args.tab_id.clone();
+                return Box::pin(async move {
+                    match runtime_state
+                        .set_tool_approval(&tab_id, "run_shell_command", "allow_session")
+                        .await
+                    {
+                        Ok(()) => println!("Approved shell for this session."),
+                        Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
+                    Ok(())
+                });
+            }
+            ReplCommand::ApproveShellDeny => {
+                let runtime_state = Arc::clone(&repl_runtime_state);
+                let tab_id = repl_args.tab_id.clone();
+                return Box::pin(async move {
+                    match runtime_state
+                        .set_tool_approval(&tab_id, "run_shell_command", "deny_session")
+                        .await
+                    {
+                        Ok(()) => println!("Denied shell for this session."),
+                        Err(err) => eprintln!("agent-runtime error: {}", err),
+                    }
+                    Ok(())
+                });
+            }
+            ReplCommand::Unknown { raw, suggestion } => {
+                if let Some(suggestion) = suggestion {
+                    println!("Unknown command: {}. Did you mean {}?", raw, suggestion);
+                } else {
+                    println!("Unknown command: {}", raw);
+                }
+                return Box::pin(async { Ok(()) });
+            }
+            ReplCommand::Config
+            | ReplCommand::Clear
+            | ReplCommand::ModelShow
+            | ReplCommand::ModelSet(_) => {
+                println!("Command is not available in streaming tui mode yet. Use --ui-mode classic.");
+                return Box::pin(async { Ok(()) });
+            }
+            ReplCommand::None => {}
+        }
+
+        let request = build_request(
+            &repl_args.project_path,
+            &repl_args.tab_id,
+            &repl_resolved.model,
+            prompt,
+            &local_session_id,
+            tool_mode,
+        );
+        let sink = Arc::clone(&repl_sink);
+        let runtime_state = Arc::clone(&repl_runtime_state);
+        let tool_executor = Arc::clone(&repl_tool_executor);
+        let config_provider = static_provider_for(&repl_resolved);
+
+        Box::pin(async move {
+            if tool_mode == ToolMode::Off && turn_runner::request_requires_tools(&request) {
+                let message = "This prompt requires tool execution, but tools are off.".to_string();
+                emit_error(
+                    sink.as_ref(),
+                    &request.tab_id,
+                    "tool_backend_unavailable",
+                    message,
+                );
+                emit_agent_complete(sink.as_ref(), &request.tab_id, "error");
+                return Ok(());
+            }
+
+            match turn_runner::run_turn(
+                sink.as_ref(),
+                &config_provider,
+                runtime_state.as_ref(),
+                &request,
+                tool_executor,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let outcome_str = if outcome.suspended {
+                        "suspended"
+                    } else {
+                        "completed"
+                    };
+                    emit_agent_complete(sink.as_ref(), &request.tab_id, outcome_str);
+                }
+                Err(error) => {
+                    emit_error(sink.as_ref(), &request.tab_id, "turn_loop_failed", error);
+                    emit_agent_complete(sink.as_ref(), &request.tab_id, "error");
                 }
             }
-        }
-    }
-
-    if let Some(handle) = active_turn {
-        handle.abort();
-        let _ = handle.await;
-    }
-    Ok(())
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{AgentMessageDeltaEvent, AgentStatusEvent};
 
     #[test]
-    fn keeps_same_session_on_suspended_outcome() {
-        let mut vm = TuiViewModel::new("tab-session".to_string());
-        vm.apply_update(ViewUpdate::TurnOutcome("suspended".to_string()));
-        assert!(vm.waiting_for_approval);
-        assert_eq!(vm.session_id, "tab-session");
+    fn stream_sink_preserves_message_delta_whitespace() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::MessageDelta(AgentMessageDeltaEvent {
+                delta: " hello world ".to_string(),
+            }),
+        });
+        let out = sink.take_test_output();
+        assert!(out.contains(" hello world "));
     }
 
     #[test]
-    fn completes_turn_clears_waiting_flag() {
-        let mut vm = TuiViewModel::new("tab-session".to_string());
-        vm.apply_update(ViewUpdate::WaitingApproval("approve shell".to_string()));
-        vm.apply_update(ViewUpdate::TurnOutcome("completed".to_string()));
-        assert!(!vm.waiting_for_approval);
+    fn stream_sink_emits_semantic_tool_lines_and_approval_hint() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::ToolResult(AgentToolResultEvent {
+                tool_name: "run_shell_command".to_string(),
+                call_id: "call-1".to_string(),
+                is_error: true,
+                preview: "run_shell_command requires approval".to_string(),
+                content: serde_json::json!({"approvalRequired": true}),
+                display: serde_json::Value::Null,
+            }),
+        });
+        let out = sink.take_test_output();
+        assert!(out.contains("[semantic] run_shell_command requires approval"));
+        assert!(out.contains("/approve shell once"));
+    }
+
+    #[test]
+    fn stream_sink_formats_status_lines() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::Status(AgentStatusEvent {
+                stage: "streaming".to_string(),
+                message: "connected".to_string(),
+            }),
+        });
+        let out = sink.take_test_output();
+        assert!(out.contains("[streaming] connected"));
     }
 }
