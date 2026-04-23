@@ -99,22 +99,39 @@ fn draw_frame(vm: &TuiViewModel, args: &Args, resolved: &ResolvedConfig) -> Resu
     Ok(())
 }
 
+fn setup_terminal() -> Result<(), String> {
+    let mut stdout = std::io::stdout();
+    enable_raw_mode().map_err(|e| format!("enable_raw_mode failed: {e}"))?;
+    execute!(stdout, EnterAlternateScreen)
+        .map_err(|e| format!("enter alt screen failed: {e}"))?;
+    Ok(())
+}
+
+fn cleanup_terminal() -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(err) = execute!(std::io::stdout(), LeaveAlternateScreen) {
+        errors.push(format!("leave alt screen failed: {err}"));
+    }
+    if let Err(err) = disable_raw_mode() {
+        errors.push(format!("disable_raw_mode failed: {err}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 pub async fn run_tui_shell(
     args: Args,
     resolved: ResolvedConfig,
     runtime_state: Arc<AgentRuntimeState>,
     tool_mode: ToolMode,
 ) -> Result<(), String> {
-    let mut stdout = std::io::stdout();
-    enable_raw_mode().map_err(|e| format!("enable_raw_mode failed: {e}"))?;
-    execute!(stdout, EnterAlternateScreen)
-        .map_err(|e| format!("enter alt screen failed: {e}"))?;
-
-    let result = run_tui_loop(args, resolved, runtime_state, tool_mode).await;
-
-    let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-    let _ = disable_raw_mode();
-    result
+    setup_terminal().map_err(|err| format!("tui setup failed: {err}"))?;
+    let loop_result = run_tui_loop(args, resolved, runtime_state, tool_mode).await;
+    cleanup_terminal().map_err(|err| format!("tui cleanup failed: {err}"))?;
+    loop_result
 }
 
 async fn run_tui_loop(

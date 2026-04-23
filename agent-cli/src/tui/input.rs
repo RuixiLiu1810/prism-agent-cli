@@ -26,6 +26,7 @@ pub fn to_action(key: KeyEvent) -> Option<UiAction> {
         (KeyCode::Up, _) => Some(UiAction::HistoryUp),
         (KeyCode::Down, _) => Some(UiAction::HistoryDown),
         (KeyCode::Esc, _) => Some(UiAction::FocusInput),
+        (KeyCode::Tab, _) => Some(UiAction::ToggleDetail),
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => Some(UiAction::ClearScreen),
         (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(UiAction::FocusNextLine),
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => Some(UiAction::FocusPrevLine),

@@ -74,7 +74,7 @@ pub fn map_payload(payload: &AgentEventPayload) -> Option<ViewUpdate> {
 
 #[cfg(test)]
 mod tests {
-    use agent_core::AgentToolResultEvent;
+    use agent_core::{AgentErrorEvent, AgentToolResultEvent};
 
     use super::*;
 
@@ -105,5 +105,15 @@ mod tests {
         });
         let update = map_payload(&payload).unwrap_or_else(|| panic!("must map"));
         assert!(matches!(update, ViewUpdate::WaitingApproval(_)));
+    }
+
+    #[test]
+    fn maps_error_payload_to_semantic_error_line() {
+        let payload = AgentEventPayload::Error(AgentErrorEvent {
+            code: "turn_loop_failed".to_string(),
+            message: "network down".to_string(),
+        });
+        let update = map_payload(&payload).unwrap_or_else(|| panic!("must map"));
+        assert!(matches!(update, ViewUpdate::Error(_)));
     }
 }
