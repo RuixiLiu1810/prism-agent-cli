@@ -19,6 +19,12 @@ pub enum ToolMode {
     Safe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    Tui,
+    Classic,
+}
+
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum ConfigSubcommand {
     Init,
@@ -57,6 +63,17 @@ pub fn parse_tool_mode(raw: &str) -> Result<ToolMode, String> {
     }
 }
 
+pub fn parse_ui_mode(raw: &str) -> Result<UiMode, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tui" => Ok(UiMode::Tui),
+        "classic" => Ok(UiMode::Classic),
+        other => Err(format!(
+            "Unsupported ui mode '{}'. Use 'tui' or 'classic'.",
+            other
+        )),
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "agent-runtime", version)]
 pub struct Args {
@@ -89,6 +106,9 @@ pub struct Args {
 
     #[arg(long, env = "AGENT_TOOL_MODE")]
     pub tool_mode: Option<String>,
+
+    #[arg(long, env = "AGENT_UI_MODE")]
+    pub ui_mode: Option<String>,
 }
 
 impl Args {
@@ -106,8 +126,8 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_output_mode, parse_tool_mode, Args, Command, ConfigSubcommand, OutputMode, RunMode,
-        ToolMode,
+        parse_output_mode, parse_tool_mode, parse_ui_mode, Args, Command, ConfigSubcommand,
+        OutputMode, RunMode, ToolMode, UiMode,
     };
     use clap::Parser;
 
@@ -191,5 +211,23 @@ mod tests {
             parse_tool_mode("off").unwrap_or_else(|e| panic!("parse: {e}")),
             ToolMode::Off
         );
+    }
+
+    #[test]
+    fn parses_ui_mode_tui_and_classic() {
+        assert_eq!(
+            parse_ui_mode("tui").unwrap_or_else(|e| panic!("parse: {e}")),
+            UiMode::Tui
+        );
+        assert_eq!(
+            parse_ui_mode("classic").unwrap_or_else(|e| panic!("parse: {e}")),
+            UiMode::Classic
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_ui_mode() {
+        let err = parse_ui_mode("fancy").err();
+        assert!(err.is_some());
     }
 }

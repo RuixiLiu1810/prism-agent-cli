@@ -20,7 +20,7 @@ use agent_core::{
     AgentTaskKind, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
     ToolExecutorFn,
 };
-use args::{Args, Command, ConfigSubcommand, OutputMode, RunMode, ToolMode};
+use args::{Args, Command, ConfigSubcommand, OutputMode, RunMode, ToolMode, UiMode};
 use clap::Parser;
 use config_model::ResolvedConfig;
 use output::{HumanEventSink, JsonlEventSink};
@@ -37,6 +37,18 @@ fn completion_outcome(suspended: bool) -> &'static str {
     } else {
         "completed"
     }
+}
+
+fn should_refresh_header_after_turn(suspended: bool) -> bool {
+    !suspended
+}
+
+fn resolve_ui_mode(args: &Args) -> Result<UiMode, String> {
+    args::parse_ui_mode(args.ui_mode.as_deref().unwrap_or("tui"))
+}
+
+fn should_use_tui(run_mode: RunMode, output_mode: OutputMode, ui_mode: UiMode) -> bool {
+    run_mode == RunMode::Repl && output_mode == OutputMode::Human && ui_mode == UiMode::Tui
 }
 
 fn build_request(
@@ -306,6 +318,12 @@ mod tests {
     }
 
     #[test]
+    fn suspended_turns_do_not_refresh_repl_header() {
+        assert!(should_refresh_header_after_turn(false));
+        assert!(!should_refresh_header_after_turn(true));
+    }
+
+    #[test]
     fn request_requires_tools_for_selection_edit_prompts() {
         let request = AgentTurnDescriptor {
             project_path: ".".to_string(),
@@ -402,6 +420,14 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let _ui_mode = match resolve_ui_mode(&args) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("agent-runtime error: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+    let _should_use_tui = should_use_tui(args.run_mode(), output_mode, _ui_mode);
 
     let sink: Arc<dyn EventSink> = match output_mode {
         args::OutputMode::Human => Arc::new(HumanEventSink::stdout()),
@@ -693,13 +719,16 @@ async fn main() -> ExitCode {
                                 &request.tab_id,
                                 completion_outcome(outcome.suspended),
                             );
-                            if let Ok(current) = resolve_effective_config(&args_for_turn, false) {
-                                let _ = render_header(
-                                    repl_output_mode,
-                                    &args_for_turn,
-                                    &current,
-                                    &session_id_for_turn,
-                                );
+                            if should_refresh_header_after_turn(outcome.suspended) {
+                                if let Ok(current) = resolve_effective_config(&args_for_turn, false)
+                                {
+                                    let _ = render_header(
+                                        repl_output_mode,
+                                        &args_for_turn,
+                                        &current,
+                                        &session_id_for_turn,
+                                    );
+                                }
                             }
                             Ok(())
                         }
