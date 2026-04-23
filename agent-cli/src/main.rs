@@ -374,6 +374,20 @@ mod tests {
         let missing = config_resolver::detect_missing(&merged);
         assert_eq!(missing.len(), 3);
     }
+
+    #[test]
+    fn chooses_tui_for_repl_human_tui_mode() {
+        assert!(should_use_tui(RunMode::Repl, OutputMode::Human, UiMode::Tui));
+    }
+
+    #[test]
+    fn keeps_classic_for_jsonl_even_when_tui_mode() {
+        assert!(!should_use_tui(
+            RunMode::Repl,
+            OutputMode::Jsonl,
+            UiMode::Tui
+        ));
+    }
 }
 
 #[tokio::main]
@@ -407,6 +421,8 @@ async fn main() -> ExitCode {
         }
     };
 
+    let run_mode = args.run_mode();
+
     let output_mode = match args::parse_output_mode(&resolved.output) {
         Ok(mode) => mode,
         Err(err) => {
@@ -421,21 +437,36 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _ui_mode = match resolve_ui_mode(&args) {
+    let ui_mode = match resolve_ui_mode(&args) {
         Ok(mode) => mode,
         Err(err) => {
             eprintln!("agent-runtime error: {}", err);
             return ExitCode::FAILURE;
         }
     };
-    let _should_use_tui = should_use_tui(args.run_mode(), output_mode, _ui_mode);
+    let use_tui = should_use_tui(run_mode, output_mode, ui_mode);
+
+    let runtime_state = Arc::new(AgentRuntimeState::default());
+
+    if use_tui {
+        if let Err(err) = tui::shell::run_tui_shell(
+            args.clone(),
+            resolved.clone(),
+            Arc::clone(&runtime_state),
+            tool_mode,
+        )
+        .await
+        {
+            eprintln!("agent-runtime error: {}", err);
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
 
     let sink: Arc<dyn EventSink> = match output_mode {
         args::OutputMode::Human => Arc::new(HumanEventSink::stdout()),
         args::OutputMode::Jsonl => Arc::new(JsonlEventSink::stdout()),
     };
-
-    let runtime_state = Arc::new(AgentRuntimeState::default());
 
     let tool_runtime_state = Arc::clone(&runtime_state);
     let tool_tab_id = args.tab_id.clone();
@@ -452,7 +483,7 @@ async fn main() -> ExitCode {
 
     let local_session_id = format!("{}-session", args.tab_id);
 
-    match args.run_mode() {
+    match run_mode {
         RunMode::SingleTurn => {
             let prompt = args.prompt.clone().unwrap_or_default();
             let request = build_request(
