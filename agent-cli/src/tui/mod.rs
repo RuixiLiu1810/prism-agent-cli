@@ -1,6 +1,14 @@
-pub mod event_bridge;
-pub mod input;
-pub mod renderer;
 pub mod shell;
+
+// Legacy full-screen TUI building blocks are kept for tests/regression
+// coverage, but the runtime now uses streaming non-fullscreen shell.
+#[cfg(test)]
+pub mod event_bridge;
+#[cfg(test)]
+pub mod input;
+#[cfg(test)]
+pub mod renderer;
+#[cfg(test)]
 pub mod types;
+#[cfg(test)]
 pub mod view_model;
