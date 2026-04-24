@@ -1,21 +1,31 @@
 use std::io::Write;
 
 use crate::status_snapshot::CliStatusSnapshot;
+use crate::tui::theme::{Role, Theme};
 
 pub fn render_header(snapshot: &CliStatusSnapshot) -> String {
     let dirty_suffix = if snapshot.git_dirty { "*" } else { "" };
-    let line_one = format!(
-        "{} / {} | {} | {}",
-        snapshot.provider, snapshot.model, snapshot.output_mode, snapshot.session_id
+    let theme = Theme::detect();
+    let banner = theme.paint(Role::Accent, "=== agent-runtime ==============================================");
+    let footer = theme.paint(Role::Accent, "===============================================================");
+    let line_one = theme.paint(
+        Role::Text,
+        format!(
+            "{} / {} | {} | {}",
+            snapshot.provider, snapshot.model, snapshot.output_mode, snapshot.session_id
+        ),
     );
-    let line_two = format!(
-        "{} | {}{}",
-        snapshot.project_path, snapshot.git_branch, dirty_suffix
+    let line_two = theme.paint(
+        Role::Subtle,
+        format!(
+            "{} | {}{}",
+            snapshot.project_path, snapshot.git_branch, dirty_suffix
+        ),
     );
 
     format!(
-        "\n=== agent-runtime ==============================================\n{}\n{}\n===============================================================\n",
-        line_one, line_two
+        "\n{}\n{}\n{}\n{}\n",
+        banner, line_one, line_two, footer
     )
 }
 

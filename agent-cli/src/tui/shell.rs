@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -13,7 +14,9 @@ use crate::command_router::{self, ReplCommand};
 use crate::config_model::ResolvedConfig;
 use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
+use crate::tui::icons::{reduced_motion_enabled, Icons};
 use crate::tui::layout::{render_slots, Slot, SlotLine};
+use crate::tui::theme::{Role, Theme};
 use crate::{tool_executor, turn_runner};
 
 fn write_line<W: Write>(writer: &mut W, line: &str) {
@@ -32,6 +35,10 @@ struct StreamingTuiEventSink {
     writer: Mutex<Vec<u8>>,
     mirror_stdout: bool,
     session_status: Mutex<UiSessionStatus>,
+    icons: Icons,
+    theme: Theme,
+    reduced_motion: bool,
+    spinner_tick: AtomicUsize,
 }
 
 impl StreamingTuiEventSink {
@@ -40,6 +47,10 @@ impl StreamingTuiEventSink {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: true,
             session_status: Mutex::new(UiSessionStatus::Idle),
+            icons: Icons::detect(),
+            theme: Theme::detect(),
+            reduced_motion: reduced_motion_enabled(),
+            spinner_tick: AtomicUsize::new(0),
         }
     }
 
@@ -49,6 +60,10 @@ impl StreamingTuiEventSink {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: false,
             session_status: Mutex::new(UiSessionStatus::Idle),
+            icons: Icons::detect(),
+            theme: Theme { enable_color: false },
+            reduced_motion: true,
+            spinner_tick: AtomicUsize::new(0),
         }
     }
 
@@ -129,11 +144,17 @@ impl StreamingTuiEventSink {
         }
     }
 
-    fn render_tool_call(call: &AgentToolCallEvent) -> SlotLine {
-        SlotLine::new(Slot::Scrollable, format!("[tool] {} ({})", call.tool_name, call.call_id))
+    fn render_tool_call(&self, call: &AgentToolCallEvent) -> SlotLine {
+        SlotLine::new(
+            Slot::Scrollable,
+            self.theme.paint(
+                Role::Accent,
+                format!("{} {} ({})", self.icons.tool, call.tool_name, call.call_id),
+            ),
+        )
     }
 
-    fn render_tool_result(result: &AgentToolResultEvent) -> Vec<SlotLine> {
+    fn render_tool_result(&self, result: &AgentToolResultEvent) -> Vec<SlotLine> {
         if result
             .content
             .get("approvalRequired")
@@ -141,28 +162,75 @@ impl StreamingTuiEventSink {
             .unwrap_or(false)
         {
             return vec![
-                SlotLine::new(Slot::Scrollable, format!("[semantic] {}", result.preview)),
+                SlotLine::new(
+                    Slot::Scrollable,
+                    self.theme.paint(
+                        Role::Warning,
+                        format!("{} {}", self.icons.waiting, result.preview),
+                    ),
+                ),
                 SlotLine::new(
                     Slot::Bottom,
-                    "[detail] run /approve shell once or /approve shell session",
+                    self.theme.paint(
+                        Role::Subtle,
+                        format!(
+                            "{} run /approve shell once or /approve shell session",
+                            self.icons.detail
+                        ),
+                    ),
                 ),
             ];
         }
 
         vec![
-            SlotLine::new(Slot::Scrollable, format!("[semantic] {}", result.preview)),
+            SlotLine::new(
+                Slot::Scrollable,
+                self.theme.paint(
+                    Role::Text,
+                    format!("{} {}", self.icons.semantic, result.preview),
+                ),
+            ),
             SlotLine::new(
                 Slot::Bottom,
-                format!(
-                    "[detail] tool={} call_id={} is_error={}",
-                    result.tool_name, result.call_id, result.is_error
+                self.theme.paint(
+                    Role::Subtle,
+                    format!(
+                        "{} tool={} call_id={} is_error={}",
+                        self.icons.detail, result.tool_name, result.call_id, result.is_error
+                    ),
                 ),
             ),
         ]
     }
 
-    fn render_error(error: &AgentErrorEvent) -> SlotLine {
-        SlotLine::new(Slot::Scrollable, format!("[error:{}] {}", error.code, error.message))
+    fn render_error(&self, error: &AgentErrorEvent) -> SlotLine {
+        SlotLine::new(
+            Slot::Scrollable,
+            self.theme.paint(
+                Role::Error,
+                format!("{} [{}] {}", self.icons.error, error.code, error.message),
+            ),
+        )
+    }
+
+    fn render_status(&self, stage: &str, message: &str) -> SlotLine {
+        let role = if stage == "awaiting_approval" {
+            Role::Warning
+        } else {
+            Role::Subtle
+        };
+        let prefix = if matches!(stage, "streaming" | "responding_after_tools") {
+            let tick = self.spinner_tick.fetch_add(1, Ordering::Relaxed);
+            self.icons.spinner_frame(tick, self.reduced_motion)
+        } else {
+            self.icons.semantic
+        };
+
+        SlotLine::new(
+            Slot::Scrollable,
+            self.theme
+                .paint(role, format!("{} [{}] {}", prefix, stage, message)),
+        )
     }
 }
 
@@ -176,15 +244,10 @@ impl EventSink for StreamingTuiEventSink {
         }
 
         let lines = match &envelope.payload {
-            AgentEventPayload::Status(status) => {
-                vec![SlotLine::new(
-                    Slot::Scrollable,
-                    format!("[{}] {}", status.stage, status.message),
-                )]
-            }
-            AgentEventPayload::ToolCall(call) => vec![Self::render_tool_call(call)],
-            AgentEventPayload::ToolResult(result) => Self::render_tool_result(result),
-            AgentEventPayload::Error(error) => vec![Self::render_error(error)],
+            AgentEventPayload::Status(status) => vec![self.render_status(&status.stage, &status.message)],
+            AgentEventPayload::ToolCall(call) => vec![self.render_tool_call(call)],
+            AgentEventPayload::ToolResult(result) => self.render_tool_result(result),
+            AgentEventPayload::Error(error) => vec![self.render_error(error)],
             _ => Vec::new(),
         };
 
@@ -195,9 +258,17 @@ impl EventSink for StreamingTuiEventSink {
 
     fn emit_complete(&self, payload: &AgentCompletePayload) {
         self.on_turn_complete(&payload.outcome);
+        let role = if payload.outcome == "suspended" {
+            Role::Warning
+        } else {
+            Role::Success
+        };
         let lines = [SlotLine::new(
             Slot::Scrollable,
-            format!("[turn:{}]", payload.outcome),
+            self.theme.paint(
+                role,
+                format!("{} [turn:{}]", self.icons.complete, payload.outcome),
+            ),
         )];
         self.write_human(&render_slots(&lines, None));
     }
@@ -486,7 +557,7 @@ mod tests {
             }),
         });
         let out = sink.take_test_output();
-        assert!(out.contains("[semantic] run_shell_command requires approval"));
+        assert!(out.contains("run_shell_command requires approval"));
         assert!(out.contains("/approve shell once"));
     }
 

@@ -1,5 +1,7 @@
+pub mod icons;
 pub mod layout;
 pub mod shell;
+pub mod theme;
 
 // Legacy full-screen TUI building blocks are kept for tests/regression
 // coverage, but the runtime now uses streaming non-fullscreen shell.
