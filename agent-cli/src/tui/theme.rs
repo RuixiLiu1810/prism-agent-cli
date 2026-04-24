@@ -2,7 +2,6 @@
 pub enum Role {
     Text,
     Subtle,
-    Success,
     Warning,
     Error,
     Accent,
@@ -33,11 +32,10 @@ impl Theme {
         let code = match role {
             Role::Text => "0",
             Role::Subtle => "90",
-            Role::Success => "32",
             Role::Warning => "33",
             Role::Error => "31",
             Role::Accent => "36",
-            Role::CommandRowBg => "48;5;252;30",
+            Role::CommandRowBg => "48;5;252",
         };
         format!("\x1b[{}m{}\x1b[0m", code, text)
     }
@@ -58,8 +56,8 @@ mod tests {
     #[test]
     fn paint_with_color_wraps_ansi() {
         let theme = Theme { enable_color: true };
-        let output = theme.paint(Role::Success, "ok");
-        assert!(output.contains("\x1b[32m"));
+        let output = theme.paint(Role::Accent, "ok");
+        assert!(output.contains("\x1b[36m"));
         assert!(output.ends_with("\x1b[0m"));
     }
 

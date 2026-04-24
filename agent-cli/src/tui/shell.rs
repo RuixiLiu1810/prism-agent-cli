@@ -1,11 +1,11 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
     emit_agent_complete, emit_error, AgentCompletePayload, AgentErrorEvent, AgentEventEnvelope,
     AgentEventPayload, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState, AgentTaskKind,
-    AgentToolCallEvent, AgentToolResultEvent, AgentTurnDescriptor, AgentTurnProfile, EventSink,
+    AgentToolResultEvent, AgentTurnDescriptor, AgentTurnProfile, EventSink,
     StaticConfigProvider, ToolExecutorFn,
 };
 
@@ -149,13 +149,23 @@ impl StreamingTuiEventSink {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        let mut normalized = if !*prefix_guard {
+            delta.trim_start_matches(['\n', '\r']).to_string()
+        } else {
+            delta.to_string()
+        };
+        normalized = normalize_markdown_chunk(&normalized);
+        if normalized.is_empty() {
+            return;
+        }
+
         if !*prefix_guard {
             self.write_human("● ");
             *prefix_guard = true;
             *col_guard = 2;
         }
 
-        for ch in delta.chars() {
+        for ch in normalized.chars() {
             if ch == '\n' {
                 self.write_human("\n  ");
                 *col_guard = 2;
@@ -178,6 +188,14 @@ impl StreamingTuiEventSink {
         }
     }
 
+    fn clear_submitted_prompt_echo(&self) {
+        if self.mirror_stdout && io::stdout().is_terminal() {
+            // Canonical-mode terminals echo the submitted input line. Clear it so
+            // transcript history keeps only the styled command row.
+            self.write_human("\x1b[1A\r\x1b[2K");
+        }
+    }
+
     fn set_status(&self, next: UiSessionStatus) {
         if let Ok(mut guard) = self.session_status.lock() {
             *guard = next;
@@ -192,11 +210,8 @@ impl StreamingTuiEventSink {
     }
 
     fn prompt_prefix(&self) -> &'static str {
-        match self.session_status() {
-            UiSessionStatus::Idle => "> ",
-            UiSessionStatus::Busy => "(busy)> ",
-            UiSessionStatus::WaitingApproval => "(approval)> ",
-        }
+        let _ = self.session_status();
+        "› "
     }
 
     fn on_event_payload(&self, payload: &AgentEventPayload) {
@@ -231,16 +246,6 @@ impl StreamingTuiEventSink {
         } else {
             self.set_status(UiSessionStatus::Idle);
         }
-    }
-
-    fn render_tool_call(&self, call: &AgentToolCallEvent) -> SlotLine {
-        SlotLine::new(
-            Slot::Scrollable,
-            self.theme.paint(
-                Role::Accent,
-                format!("{} {} ({})", self.icons.tool, call.tool_name, call.call_id),
-            ),
-        )
     }
 
     fn render_tool_result(&self, result: &AgentToolResultEvent) -> Vec<SlotLine> {
@@ -335,9 +340,18 @@ impl EventSink for StreamingTuiEventSink {
         self.flush_assistant_stream_boundary();
 
         let lines = match &envelope.payload {
-            AgentEventPayload::Status(status) => vec![self.render_status(&status.stage, &status.message)],
-            AgentEventPayload::ToolCall(call) => vec![self.render_tool_call(call)],
-            AgentEventPayload::ToolResult(result) => self.render_tool_result(result),
+            AgentEventPayload::Status(status) if status.stage == "awaiting_approval" => {
+                vec![self.render_status(&status.stage, &status.message)]
+            }
+            AgentEventPayload::ToolResult(result)
+                if result
+                    .content
+                    .get("approvalRequired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false) =>
+            {
+                self.render_tool_result(result)
+            }
             AgentEventPayload::Error(error) => vec![self.render_error(error)],
             _ => Vec::new(),
         };
@@ -350,20 +364,31 @@ impl EventSink for StreamingTuiEventSink {
     fn emit_complete(&self, payload: &AgentCompletePayload) {
         self.flush_assistant_stream_boundary();
         self.on_turn_complete(&payload.outcome);
-        let role = if payload.outcome == "suspended" {
-            Role::Warning
-        } else {
-            Role::Success
-        };
-        let lines = [SlotLine::new(
-            Slot::Scrollable,
-            self.theme.paint(
-                role,
-                format!("{} [turn:{}]", self.icons.complete, payload.outcome),
-            ),
-        )];
-        self.write_human(&render_slots(&lines, None));
     }
+}
+
+fn normalize_markdown_chunk(delta: &str) -> String {
+    fn strip_heading_prefix(line: &str) -> &str {
+        let trimmed = line.trim_start_matches(' ');
+        for prefix in ["### ", "## ", "# "] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                return rest;
+            }
+        }
+        line
+    }
+
+    let mut out = String::with_capacity(delta.len());
+    for segment in delta.split_inclusive('\n') {
+        let (line, newline) = if let Some(stripped) = segment.strip_suffix('\n') {
+            (stripped, "\n")
+        } else {
+            (segment, "")
+        };
+        out.push_str(strip_heading_prefix(line));
+        out.push_str(newline);
+    }
+    out.replace("**", "")
 }
 
 fn build_request(
@@ -442,8 +467,6 @@ pub async fn run_tui_shell(
     runtime_state: Arc<AgentRuntimeState>,
     tool_mode: ToolMode,
 ) -> Result<(), String> {
-    println!("[tui] streaming mode (non-fullscreen)");
-
     let streaming_sink = Arc::new(StreamingTuiEventSink::stdout());
     let sink: Arc<dyn EventSink> = streaming_sink.clone();
     let local_session_id = format!("{}-session", args.tab_id);
@@ -498,6 +521,7 @@ pub async fn run_tui_shell(
     }, move |prompt| {
         match command_router::parse_repl_command(&prompt) {
             ReplCommand::None => {
+                repl_streaming_sink_for_submit.clear_submitted_prompt_echo();
                 repl_streaming_sink_for_submit.render_user_prompt(&prompt);
             }
             ReplCommand::Help => {
@@ -721,7 +745,7 @@ mod tests {
             }),
         });
         let out = sink.take_test_output();
-        assert!(out.contains("[streaming] connected"));
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -739,14 +763,14 @@ mod tests {
             }),
         });
         assert_eq!(sink.session_status(), UiSessionStatus::WaitingApproval);
-        assert_eq!(sink.prompt_prefix(), "(approval)> ");
+        assert_eq!(sink.prompt_prefix(), "› ");
 
         sink.emit_complete(&AgentCompletePayload {
             tab_id: "t1".to_string(),
             outcome: "suspended".to_string(),
         });
         assert_eq!(sink.session_status(), UiSessionStatus::WaitingApproval);
-        assert_eq!(sink.prompt_prefix(), "(approval)> ");
+        assert_eq!(sink.prompt_prefix(), "› ");
     }
 
     #[test]
@@ -766,7 +790,7 @@ mod tests {
             outcome: "completed".to_string(),
         });
         assert_eq!(sink.session_status(), UiSessionStatus::Idle);
-        assert_eq!(sink.prompt_prefix(), "> ");
+        assert_eq!(sink.prompt_prefix(), "› ");
     }
 
     #[test]
@@ -799,13 +823,21 @@ mod tests {
         });
 
         let out = sink.take_test_output();
-        let suspended = out
-            .find("[turn:suspended]")
-            .unwrap_or_else(|| panic!("missing suspended outcome"));
-        let completed = out
-            .find("[turn:completed]")
-            .unwrap_or_else(|| panic!("missing completed outcome"));
-        assert!(completed > suspended);
+        assert!(!out.contains("[turn:suspended]"));
+        assert!(!out.contains("[turn:completed]"));
+    }
+
+    #[test]
+    fn first_delta_strips_leading_newlines_before_marker() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::MessageDelta(AgentMessageDeltaEvent {
+                delta: "\n\nHello".to_string(),
+            }),
+        });
+        let out = sink.take_test_output();
+        assert!(out.starts_with("● Hello"));
     }
 
     #[test]

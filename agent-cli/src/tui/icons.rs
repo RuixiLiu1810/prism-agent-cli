@@ -10,7 +10,7 @@ pub struct Icons {
 
 impl Icons {
     pub fn project_logo() -> &'static str {
-        "███  ███\n██ ██ ██\n██    ██\n████████\n██    ██\n██    ██"
+        "▗▄▖▗▄▖\n▐▌▚▞▐▌\n▐▌▞▚▐▌\n▝▚▞▝▚▞"
     }
 
     pub fn detect() -> Self {
@@ -73,8 +73,8 @@ mod tests {
     #[test]
     fn project_logo_is_unicode_pixel_block() {
         let logo = Icons::project_logo();
-        assert_eq!(logo.lines().count(), 6);
-        assert!(logo.contains("█"));
+        assert_eq!(logo.lines().count(), 4);
+        assert!(logo.contains("▗"));
     }
 
     #[test]

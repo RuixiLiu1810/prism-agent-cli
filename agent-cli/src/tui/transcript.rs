@@ -65,9 +65,16 @@ fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
 }
 
 pub fn render_user_command_rows(theme: &Theme, text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     wrap_with_prefix("› ", text, width)
         .into_iter()
-        .map(|line| theme.paint(Role::CommandRowBg, line))
+        .map(|mut line| {
+            let line_len = line.chars().count();
+            if line_len < width {
+                line.push_str(&" ".repeat(width - line_len));
+            }
+            theme.paint(Role::CommandRowBg, line)
+        })
         .collect()
 }
 
@@ -110,6 +117,16 @@ mod tests {
         let rows = super::render_user_command_rows(&theme, "who are you", 40);
         assert!(rows[0].contains("› who are you"));
         assert!(rows[0].contains("\x1b[48;"));
+    }
+
+    #[test]
+    fn renders_user_command_row_full_width_when_no_color() {
+        let theme = crate::tui::theme::Theme {
+            enable_color: false,
+        };
+        let rows = super::render_user_command_rows(&theme, "hi", 12);
+        assert_eq!(rows[0].chars().count(), 12);
+        assert!(rows[0].starts_with("› hi"));
     }
 
     #[test]
