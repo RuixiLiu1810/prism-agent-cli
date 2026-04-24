@@ -18,6 +18,7 @@ use crate::tui::icons::{reduced_motion_enabled, Icons};
 use crate::tui::layout::{render_header_block, render_notice_line, render_slots, Slot, SlotLine};
 use crate::tui::suggestions::render_command_suggestions;
 use crate::tui::theme::{Role, Theme};
+use crate::tui::transcript::render_user_command_rows;
 use crate::{tool_executor, turn_runner};
 
 fn write_line<W: Write>(writer: &mut W, line: &str) {
@@ -55,6 +56,8 @@ struct StreamingTuiEventSink {
     theme: Theme,
     reduced_motion: bool,
     spinner_tick: AtomicUsize,
+    assistant_prefix_printed: Mutex<bool>,
+    assistant_col: Mutex<usize>,
 }
 
 impl StreamingTuiEventSink {
@@ -67,6 +70,8 @@ impl StreamingTuiEventSink {
             theme: Theme::detect(),
             reduced_motion: reduced_motion_enabled(),
             spinner_tick: AtomicUsize::new(0),
+            assistant_prefix_printed: Mutex::new(false),
+            assistant_col: Mutex::new(0),
         }
     }
 
@@ -80,6 +85,8 @@ impl StreamingTuiEventSink {
             theme: Theme { enable_color: false },
             reduced_motion: true,
             spinner_tick: AtomicUsize::new(0),
+            assistant_prefix_printed: Mutex::new(false),
+            assistant_col: Mutex::new(0),
         }
     }
 
@@ -102,6 +109,72 @@ impl StreamingTuiEventSink {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             write_line(&mut handle, line);
+        }
+    }
+
+    fn terminal_width_or_default() -> usize {
+        crossterm::terminal::size()
+            .map(|(width, _)| width as usize)
+            .unwrap_or(120)
+    }
+
+    fn reset_assistant_stream(&self) {
+        if let Ok(mut prefix) = self.assistant_prefix_printed.lock() {
+            *prefix = false;
+        }
+        if let Ok(mut col) = self.assistant_col.lock() {
+            *col = 0;
+        }
+    }
+
+    fn flush_assistant_stream_boundary(&self) {
+        let should_flush = match self.assistant_prefix_printed.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        if should_flush {
+            self.write_human("\n");
+            self.reset_assistant_stream();
+        }
+    }
+
+    fn write_assistant_delta_wrapped(&self, delta: &str) {
+        let width = Self::terminal_width_or_default().max(4);
+        let mut prefix_guard = match self.assistant_prefix_printed.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut col_guard = match self.assistant_col.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !*prefix_guard {
+            self.write_human("● ");
+            *prefix_guard = true;
+            *col_guard = 2;
+        }
+
+        for ch in delta.chars() {
+            if ch == '\n' {
+                self.write_human("\n  ");
+                *col_guard = 2;
+                continue;
+            }
+            if *col_guard >= width {
+                self.write_human("\n  ");
+                *col_guard = 2;
+            }
+            let mut buf = [0; 4];
+            self.write_human(ch.encode_utf8(&mut buf));
+            *col_guard += 1;
+        }
+    }
+
+    fn render_user_prompt(&self, prompt: &str) {
+        self.flush_assistant_stream_boundary();
+        for row in render_user_command_rows(&self.theme, prompt, Self::terminal_width_or_default()) {
+            self.write_human(&(row + "\n"));
         }
     }
 
@@ -255,9 +328,11 @@ impl EventSink for StreamingTuiEventSink {
         self.on_event_payload(&envelope.payload);
 
         if let AgentEventPayload::MessageDelta(delta) = &envelope.payload {
-            self.write_human(&delta.delta);
+            self.write_assistant_delta_wrapped(&delta.delta);
             return;
         }
+
+        self.flush_assistant_stream_boundary();
 
         let lines = match &envelope.payload {
             AgentEventPayload::Status(status) => vec![self.render_status(&status.stage, &status.message)],
@@ -273,6 +348,7 @@ impl EventSink for StreamingTuiEventSink {
     }
 
     fn emit_complete(&self, payload: &AgentCompletePayload) {
+        self.flush_assistant_stream_boundary();
         self.on_turn_complete(&payload.outcome);
         let role = if payload.outcome == "suspended" {
             Role::Warning
@@ -417,6 +493,9 @@ pub async fn run_tui_shell(
         repl_streaming_sink_for_prompt.prompt_prefix().to_string()
     }, move |prompt| {
         match command_router::parse_repl_command(&prompt) {
+            ReplCommand::None => {
+                repl_streaming_sink_for_submit.render_user_prompt(&prompt);
+            }
             ReplCommand::Help => {
                 render_help_panel();
                 return Box::pin(async { Ok(()) });
@@ -508,7 +587,6 @@ pub async fn run_tui_shell(
                 println!("Command is not available in streaming tui mode yet. Use --ui-mode classic.");
                 return Box::pin(async { Ok(()) });
             }
-            ReplCommand::None => {}
         }
 
         let request = build_request(
@@ -580,6 +658,27 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.contains(" hello world "));
+    }
+
+    #[test]
+    fn submitted_prompt_is_rendered_as_user_command_row() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.render_user_prompt("who are you");
+        let out = sink.take_test_output();
+        assert!(out.contains("› who are you"));
+    }
+
+    #[test]
+    fn message_delta_is_rendered_with_assistant_marker() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::MessageDelta(AgentMessageDeltaEvent {
+                delta: "hello there".to_string(),
+            }),
+        });
+        let out = sink.take_test_output();
+        assert!(out.contains("● "));
     }
 
     #[test]
