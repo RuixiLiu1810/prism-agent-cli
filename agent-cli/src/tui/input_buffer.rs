@@ -90,4 +90,11 @@ mod tests {
         assert!(buf.undo());
         assert_eq!(buf.current(), "");
     }
+
+    #[test]
+    fn clear_empties_the_buffer() {
+        let mut buf = InputBuffer::with_text("hello");
+        buf.clear();
+        assert!(buf.is_empty());
+    }
 }

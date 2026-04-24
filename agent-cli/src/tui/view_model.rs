@@ -116,4 +116,18 @@ mod tests {
         vm.toggle_detail();
         assert!(vm.lines[0].expanded);
     }
+
+    #[test]
+    fn keeps_session_id_and_supports_system_line_kind() {
+        let mut vm = TuiViewModel::new("session-42".to_string());
+        assert_eq!(vm.session_id, "session-42");
+        vm.lines.push(UiLine {
+            kind: UiLineKind::System,
+            prefix: "i".to_string(),
+            text: "system message".to_string(),
+            details: Vec::new(),
+            expanded: false,
+        });
+        assert_eq!(vm.lines[0].kind, UiLineKind::System);
+    }
 }

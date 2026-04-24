@@ -623,4 +623,43 @@ mod tests {
         assert_eq!(sink.session_status(), UiSessionStatus::Idle);
         assert_eq!(sink.prompt_prefix(), "> ");
     }
+
+    #[test]
+    fn suspended_then_completed_turns_stay_in_single_timeline() {
+        let sink = StreamingTuiEventSink::for_test();
+
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::Status(AgentStatusEvent {
+                stage: "awaiting_approval".to_string(),
+                message: "waiting for shell approval".to_string(),
+            }),
+        });
+        sink.emit_complete(&AgentCompletePayload {
+            tab_id: "t1".to_string(),
+            outcome: "suspended".to_string(),
+        });
+
+        sink.set_status(UiSessionStatus::Idle);
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::Status(AgentStatusEvent {
+                stage: "streaming".to_string(),
+                message: "resumed".to_string(),
+            }),
+        });
+        sink.emit_complete(&AgentCompletePayload {
+            tab_id: "t1".to_string(),
+            outcome: "completed".to_string(),
+        });
+
+        let out = sink.take_test_output();
+        let suspended = out
+            .find("[turn:suspended]")
+            .unwrap_or_else(|| panic!("missing suspended outcome"));
+        let completed = out
+            .find("[turn:completed]")
+            .unwrap_or_else(|| panic!("missing completed outcome"));
+        assert!(completed > suspended);
+    }
 }

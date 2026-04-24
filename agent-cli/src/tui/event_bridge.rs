@@ -147,4 +147,40 @@ mod tests {
         let update = map_complete(&complete).unwrap_or_else(|| panic!("must map"));
         assert_eq!(update, ViewUpdate::TurnOutcome("suspended".to_string()));
     }
+
+    #[test]
+    fn channel_event_sink_forwards_event_and_complete() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ChannelEventSink::new(tx);
+
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "tab-1".to_string(),
+            payload: AgentEventPayload::Status(AgentStatusEvent {
+                stage: "streaming".to_string(),
+                message: "connected".to_string(),
+            }),
+        });
+        sink.emit_complete(&AgentCompletePayload {
+            tab_id: "tab-1".to_string(),
+            outcome: "completed".to_string(),
+        });
+
+        let first = rx.try_recv().unwrap_or_else(|e| panic!("missing first event: {e}"));
+        let second = rx
+            .try_recv()
+            .unwrap_or_else(|e| panic!("missing complete event: {e}"));
+
+        match first {
+            TuiRuntimeEvent::AgentEvent(event) => {
+                assert_eq!(event.tab_id, "tab-1");
+            }
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        match second {
+            TuiRuntimeEvent::AgentComplete(payload) => {
+                assert_eq!(payload.outcome, "completed");
+            }
+            other => panic!("unexpected second event: {other:?}"),
+        }
+    }
 }

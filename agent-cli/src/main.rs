@@ -255,6 +255,7 @@ fn resolve_effective_config(args: &Args, allow_wizard: bool) -> Result<ResolvedC
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use agent_core::{AgentCompletePayload, AgentEventEnvelope, AgentEventPayload};
