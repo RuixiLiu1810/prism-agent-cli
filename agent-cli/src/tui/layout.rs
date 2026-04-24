@@ -58,6 +58,43 @@ pub fn render_slots(lines: &[SlotLine], width: Option<usize>) -> String {
     out
 }
 
+pub fn render_header_block(
+    product: &str,
+    version: &str,
+    model_line: &str,
+    path: &str,
+) -> Vec<String> {
+    let logo_lines: Vec<&str> = Icons::project_logo().lines().collect();
+    let status_lines = [
+        format!("{} {}", product, version),
+        model_line.to_string(),
+        path.to_string(),
+    ];
+    let total_lines = logo_lines.len().max(status_lines.len());
+    let logo_width = logo_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let left_col_width = logo_width + 2;
+
+    let mut out = Vec::with_capacity(total_lines);
+    for i in 0..total_lines {
+        let left = logo_lines.get(i).copied().unwrap_or("");
+        let right = status_lines.get(i).map(String::as_str).unwrap_or("");
+        if right.is_empty() {
+            out.push(left.to_string());
+        } else {
+            out.push(format!("{left:<left_col_width$}{right}"));
+        }
+    }
+    out
+}
+
+pub fn render_notice_line(primary: &str, hint: &str) -> String {
+    format!("{} · {}", primary, hint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_slots, Slot, SlotLine};
@@ -81,4 +118,27 @@ mod tests {
         let out = render_slots(&lines, Some(5));
         assert_eq!(out, "12345\n");
     }
+
+    #[test]
+    fn render_header_block_has_no_border_lines() {
+        let lines = super::render_header_block(
+            "Claude Prism",
+            "v0.1.0",
+            "MiniMax-M1 · safe mode",
+            "~/Documents/Code/claude-prism",
+        );
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("===") || line.contains("---")));
+        assert!(lines.iter().any(|line| line.contains("Claude Prism")));
+    }
+
+    #[test]
+    fn render_notice_line_uses_plain_single_line_text() {
+        let line = super::render_notice_line("Tool approvals enabled", "/commands for help");
+        assert!(line.contains("Tool approvals enabled"));
+        assert!(line.contains("/commands for help"));
+        assert!(!line.contains('\n'));
+    }
 }
+use super::icons::Icons;
