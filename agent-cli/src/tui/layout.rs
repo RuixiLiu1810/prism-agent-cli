@@ -1,3 +1,5 @@
+use super::icons::Icons;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Scrollable,
@@ -141,4 +143,3 @@ mod tests {
         assert!(!line.contains('\n'));
     }
 }
-use super::icons::Icons;

@@ -16,7 +16,6 @@ pub mod input;
 pub mod input_buffer;
 #[cfg(test)]
 pub mod renderer;
-#[cfg(test)]
 pub mod transcript;
 #[cfg(test)]
 pub mod types;

@@ -1,6 +1,8 @@
 use super::theme::{Role, Theme};
+#[cfg(test)]
 use super::types::{UiLine, UiLineKind};
 
+#[cfg(test)]
 pub fn append_assistant_delta(lines: &mut Vec<UiLine>, delta: String) {
     if delta.trim().is_empty() {
         return;
@@ -21,6 +23,7 @@ pub fn append_assistant_delta(lines: &mut Vec<UiLine>, delta: String) {
     });
 }
 
+#[cfg(test)]
 pub fn append_semantic(lines: &mut Vec<UiLine>, text: String, details: Vec<String>) {
     lines.push(UiLine {
         kind: UiLineKind::Semantic,
@@ -68,6 +71,7 @@ pub fn render_user_command_rows(theme: &Theme, text: &str, width: usize) -> Vec<
         .collect()
 }
 
+#[cfg(test)]
 pub fn render_assistant_block(marker: &str, text: &str, width: usize) -> Vec<String> {
     wrap_with_prefix(&format!("{} ", marker), text, width)
 }
