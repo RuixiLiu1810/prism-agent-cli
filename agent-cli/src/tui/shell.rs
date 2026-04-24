@@ -190,10 +190,20 @@ impl StreamingTuiEventSink {
 
     fn render_input_frame_prompt(&self) -> String {
         if self.mirror_stdout && io::stdout().is_terminal() {
-            let width = Self::terminal_width_or_default().max(16);
-            let border = self.theme.paint(Role::Subtle, "─".repeat(width));
-            // Save/restore cursor so the bottom border stays visible while typing.
-            format!("{border}\n› \x1b[s\n{border}\x1b[u")
+            if let Ok((width, height)) = crossterm::terminal::size() {
+                if height >= 4 && width >= 8 {
+                    let width = (width as usize).saturating_sub(1).max(1);
+                    let top_row = height.saturating_sub(2);
+                    let input_row = height.saturating_sub(1);
+                    let bottom_row = height;
+                    let border = self.theme.paint(Role::Subtle, "─".repeat(width));
+                    self.write_human(&format!(
+                        "\x1b[{top_row};1H\x1b[2K{border}\x1b[{input_row};1H\x1b[2K› \x1b[{bottom_row};1H\x1b[2K{border}\x1b[{input_row};3H"
+                    ));
+                    return String::new();
+                }
+            }
+            self.prompt_prefix().to_string()
         } else {
             self.prompt_prefix().to_string()
         }
@@ -201,9 +211,18 @@ impl StreamingTuiEventSink {
 
     fn clear_input_frame_after_submit(&self) {
         if self.mirror_stdout && io::stdout().is_terminal() {
-            // Enter leaves cursor on the bottom border line. Clear bottom border,
-            // prompt line, then top border before rendering transcript history.
-            self.write_human("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
+            if let Ok((_, height)) = crossterm::terminal::size() {
+                if height >= 4 {
+                    let top_row = height.saturating_sub(2);
+                    let input_row = height.saturating_sub(1);
+                    let bottom_row = height;
+                    // Clear the bottom input bar and place cursor at the former top
+                    // border row so transcript output continues above the bar area.
+                    self.write_human(&format!(
+                        "\x1b[{top_row};1H\x1b[2K\x1b[{input_row};1H\x1b[2K\x1b[{bottom_row};1H\x1b[2K\x1b[{top_row};1H"
+                    ));
+                }
+            }
         }
     }
 
