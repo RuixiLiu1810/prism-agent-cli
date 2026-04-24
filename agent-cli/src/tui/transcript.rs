@@ -1,3 +1,4 @@
+use super::theme::{Role, Theme};
 use super::types::{UiLine, UiLineKind};
 
 pub fn append_assistant_delta(lines: &mut Vec<UiLine>, delta: String) {
@@ -30,6 +31,47 @@ pub fn append_semantic(lines: &mut Vec<UiLine>, text: String, details: Vec<Strin
     });
 }
 
+fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
+    let prefix_len = prefix.chars().count();
+    let max_width = width.max(prefix_len + 1);
+    let mut lines = Vec::new();
+    let mut current = prefix.to_string();
+    let mut current_len = prefix_len;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let needs_space = current_len > prefix_len;
+        let add_len = if needs_space { 1 + word_len } else { word_len };
+
+        if current_len + add_len > max_width && current_len > prefix_len {
+            lines.push(current);
+            current = format!("{}{}", " ".repeat(prefix_len), word);
+            current_len = prefix_len + word_len;
+            continue;
+        }
+
+        if needs_space {
+            current.push(' ');
+        }
+        current.push_str(word);
+        current_len += add_len;
+    }
+
+    lines.push(current);
+    lines
+}
+
+pub fn render_user_command_rows(theme: &Theme, text: &str, width: usize) -> Vec<String> {
+    wrap_with_prefix("› ", text, width)
+        .into_iter()
+        .map(|line| theme.paint(Role::CommandRowBg, line))
+        .collect()
+}
+
+pub fn render_assistant_block(marker: &str, text: &str, width: usize) -> Vec<String> {
+    wrap_with_prefix(&format!("{} ", marker), text, width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{append_assistant_delta, append_semantic};
@@ -56,5 +98,24 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].kind, UiLineKind::Semantic);
         assert_eq!(lines[0].details.len(), 1);
+    }
+
+    #[test]
+    fn renders_user_command_row_with_prefix_and_background() {
+        let theme = crate::tui::theme::Theme { enable_color: true };
+        let rows = super::render_user_command_rows(&theme, "who are you", 40);
+        assert!(rows[0].contains("› who are you"));
+        assert!(rows[0].contains("\x1b[48;"));
+    }
+
+    #[test]
+    fn assistant_block_wraps_with_hanging_indent() {
+        let lines = super::render_assistant_block(
+            "●",
+            "I can help with coding debugging and architecture decisions",
+            28,
+        );
+        assert!(lines[0].starts_with("● "));
+        assert!(lines[1].starts_with("  "));
     }
 }
