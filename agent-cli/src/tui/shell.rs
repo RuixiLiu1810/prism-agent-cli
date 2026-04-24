@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -215,6 +216,8 @@ impl StreamingTuiEventSink {
         for row in render_user_command_rows(&self.theme, prompt, Self::terminal_width_or_default()) {
             self.write_human(&(row + "\n"));
         }
+        // Keep a clear rhythm between user command rows and assistant response rows.
+        self.write_human("\n");
     }
 
     fn render_input_frame_prompt(&self) -> String {
@@ -500,6 +503,28 @@ fn startup_notice_text() -> String {
     render_notice_line("Session ready", "/commands for help")
 }
 
+fn display_project_path(project_path: &str) -> String {
+    let raw = project_path.trim();
+    let mut path = if raw.is_empty() || raw == "." {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(raw)
+    };
+    if path.is_relative() {
+        if let Ok(cwd) = std::env::current_dir() {
+            path = cwd.join(path);
+        }
+    }
+    let display = path.to_string_lossy().to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if display.starts_with(&home) {
+            let suffix = &display[home.len()..];
+            return format!("~{}", suffix);
+        }
+    }
+    display
+}
+
 pub async fn run_tui_shell(
     args: Args,
     resolved: ResolvedConfig,
@@ -521,7 +546,7 @@ pub async fn run_tui_shell(
             "Claude Prism",
             &format!("v{}", env!("CARGO_PKG_VERSION")),
             &model_line,
-            &args.project_path,
+            &display_project_path(&args.project_path),
         ) {
             streaming_sink.write_human(&(line + "\n"));
         }
@@ -898,6 +923,12 @@ mod tests {
         let sink = StreamingTuiEventSink::for_test();
         let prompt = sink.render_input_frame_prompt();
         assert_eq!(prompt, "› ");
+    }
+
+    #[test]
+    fn display_project_path_resolves_dot_to_directory_like_path() {
+        let path = super::display_project_path(".");
+        assert!(path != ".");
     }
 
     #[test]

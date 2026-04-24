@@ -35,7 +35,7 @@ impl Theme {
             Role::Warning => "33",
             Role::Error => "31",
             Role::Accent => "36",
-            Role::CommandRowBg => "48;5;252",
+            Role::CommandRowBg => "48;5;254",
         };
         format!("\x1b[{}m{}\x1b[0m", code, text)
     }
