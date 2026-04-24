@@ -432,6 +432,10 @@ fn render_status_inline(snapshot: &CliStatusSnapshot) {
     );
 }
 
+fn startup_notice_text() -> String {
+    render_notice_line("Session ready", "/commands for help")
+}
+
 pub async fn run_tui_shell(
     args: Args,
     resolved: ResolvedConfig,
@@ -460,7 +464,7 @@ pub async fn run_tui_shell(
             streaming_sink.write_human(&(line + "\n"));
         }
         streaming_sink.write_human("\n");
-        let notice = render_notice_line("Session ready", "/commands for help");
+        let notice = startup_notice_text();
         streaming_sink.write_human(&(notice + "\n\n"));
         chrome_state.mark_rendered(&local_session_id);
     }
@@ -679,6 +683,12 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.contains("● "));
+    }
+
+    #[test]
+    fn notice_does_not_advertise_unavailable_model_command() {
+        let text = startup_notice_text();
+        assert!(!text.contains("/model"));
     }
 
     #[test]
