@@ -1,3 +1,4 @@
+pub mod layout;
 pub mod shell;
 
 // Legacy full-screen TUI building blocks are kept for tests/regression

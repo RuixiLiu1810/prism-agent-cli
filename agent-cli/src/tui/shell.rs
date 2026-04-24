@@ -13,6 +13,7 @@ use crate::command_router::{self, ReplCommand};
 use crate::config_model::ResolvedConfig;
 use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
+use crate::tui::layout::{render_slots, Slot, SlotLine};
 use crate::{tool_executor, turn_runner};
 
 fn write_line<W: Write>(writer: &mut W, line: &str) {
@@ -128,31 +129,40 @@ impl StreamingTuiEventSink {
         }
     }
 
-    fn render_tool_call(call: &AgentToolCallEvent) -> String {
-        format!("\n[tool] {} ({})\n", call.tool_name, call.call_id)
+    fn render_tool_call(call: &AgentToolCallEvent) -> SlotLine {
+        SlotLine::new(Slot::Scrollable, format!("[tool] {} ({})", call.tool_name, call.call_id))
     }
 
-    fn render_tool_result(result: &AgentToolResultEvent) -> String {
+    fn render_tool_result(result: &AgentToolResultEvent) -> Vec<SlotLine> {
         if result
             .content
             .get("approvalRequired")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
-            return format!(
-                "\n[semantic] {}\n[detail] run /approve shell once or /approve shell session\n",
-                result.preview
-            );
+            return vec![
+                SlotLine::new(Slot::Scrollable, format!("[semantic] {}", result.preview)),
+                SlotLine::new(
+                    Slot::Bottom,
+                    "[detail] run /approve shell once or /approve shell session",
+                ),
+            ];
         }
 
-        format!(
-            "\n[semantic] {}\n[detail] tool={} call_id={} is_error={}\n",
-            result.preview, result.tool_name, result.call_id, result.is_error
-        )
+        vec![
+            SlotLine::new(Slot::Scrollable, format!("[semantic] {}", result.preview)),
+            SlotLine::new(
+                Slot::Bottom,
+                format!(
+                    "[detail] tool={} call_id={} is_error={}",
+                    result.tool_name, result.call_id, result.is_error
+                ),
+            ),
+        ]
     }
 
-    fn render_error(error: &AgentErrorEvent) -> String {
-        format!("\n[error:{}] {}\n", error.code, error.message)
+    fn render_error(error: &AgentErrorEvent) -> SlotLine {
+        SlotLine::new(Slot::Scrollable, format!("[error:{}] {}", error.code, error.message))
     }
 }
 
@@ -160,25 +170,36 @@ impl EventSink for StreamingTuiEventSink {
     fn emit_event(&self, envelope: &AgentEventEnvelope) {
         self.on_event_payload(&envelope.payload);
 
-        let line = match &envelope.payload {
+        if let AgentEventPayload::MessageDelta(delta) = &envelope.payload {
+            self.write_human(&delta.delta);
+            return;
+        }
+
+        let lines = match &envelope.payload {
             AgentEventPayload::Status(status) => {
-                format!("\n[{}] {}\n", status.stage, status.message)
+                vec![SlotLine::new(
+                    Slot::Scrollable,
+                    format!("[{}] {}", status.stage, status.message),
+                )]
             }
-            AgentEventPayload::MessageDelta(delta) => delta.delta.clone(),
-            AgentEventPayload::ToolCall(call) => Self::render_tool_call(call),
+            AgentEventPayload::ToolCall(call) => vec![Self::render_tool_call(call)],
             AgentEventPayload::ToolResult(result) => Self::render_tool_result(result),
-            AgentEventPayload::Error(error) => Self::render_error(error),
-            _ => String::new(),
+            AgentEventPayload::Error(error) => vec![Self::render_error(error)],
+            _ => Vec::new(),
         };
 
-        if !line.is_empty() {
-            self.write_human(&line);
+        if !lines.is_empty() {
+            self.write_human(&render_slots(&lines, None));
         }
     }
 
     fn emit_complete(&self, payload: &AgentCompletePayload) {
         self.on_turn_complete(&payload.outcome);
-        self.write_human(&format!("\n[turn:{}]\n", payload.outcome));
+        let lines = [SlotLine::new(
+            Slot::Scrollable,
+            format!("[turn:{}]", payload.outcome),
+        )];
+        self.write_human(&render_slots(&lines, None));
     }
 }
 
