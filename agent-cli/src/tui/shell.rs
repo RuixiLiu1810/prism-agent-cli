@@ -20,9 +20,17 @@ fn write_line<W: Write>(writer: &mut W, line: &str) {
     let _ = writer.flush();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiSessionStatus {
+    Idle,
+    Busy,
+    WaitingApproval,
+}
+
 struct StreamingTuiEventSink {
     writer: Mutex<Vec<u8>>,
     mirror_stdout: bool,
+    session_status: Mutex<UiSessionStatus>,
 }
 
 impl StreamingTuiEventSink {
@@ -30,6 +38,7 @@ impl StreamingTuiEventSink {
         Self {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: true,
+            session_status: Mutex::new(UiSessionStatus::Idle),
         }
     }
 
@@ -38,6 +47,7 @@ impl StreamingTuiEventSink {
         Self {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: false,
+            session_status: Mutex::new(UiSessionStatus::Idle),
         }
     }
 
@@ -60,6 +70,61 @@ impl StreamingTuiEventSink {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             write_line(&mut handle, line);
+        }
+    }
+
+    fn set_status(&self, next: UiSessionStatus) {
+        if let Ok(mut guard) = self.session_status.lock() {
+            *guard = next;
+        }
+    }
+
+    fn session_status(&self) -> UiSessionStatus {
+        match self.session_status.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    fn prompt_prefix(&self) -> &'static str {
+        match self.session_status() {
+            UiSessionStatus::Idle => "> ",
+            UiSessionStatus::Busy => "(busy)> ",
+            UiSessionStatus::WaitingApproval => "(approval)> ",
+        }
+    }
+
+    fn on_event_payload(&self, payload: &AgentEventPayload) {
+        match payload {
+            AgentEventPayload::Status(status) => {
+                if status.stage == "awaiting_approval" {
+                    self.set_status(UiSessionStatus::WaitingApproval);
+                } else {
+                    self.set_status(UiSessionStatus::Busy);
+                }
+            }
+            AgentEventPayload::ToolResult(result) => {
+                if result
+                    .content
+                    .get("approvalRequired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    self.set_status(UiSessionStatus::WaitingApproval);
+                }
+            }
+            AgentEventPayload::Error(_) => {
+                self.set_status(UiSessionStatus::Idle);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_turn_complete(&self, outcome: &str) {
+        if outcome == "suspended" {
+            self.set_status(UiSessionStatus::WaitingApproval);
+        } else {
+            self.set_status(UiSessionStatus::Idle);
         }
     }
 
@@ -93,6 +158,8 @@ impl StreamingTuiEventSink {
 
 impl EventSink for StreamingTuiEventSink {
     fn emit_event(&self, envelope: &AgentEventEnvelope) {
+        self.on_event_payload(&envelope.payload);
+
         let line = match &envelope.payload {
             AgentEventPayload::Status(status) => {
                 format!("\n[{}] {}\n", status.stage, status.message)
@@ -110,6 +177,7 @@ impl EventSink for StreamingTuiEventSink {
     }
 
     fn emit_complete(&self, payload: &AgentCompletePayload) {
+        self.on_turn_complete(&payload.outcome);
         self.write_human(&format!("\n[turn:{}]\n", payload.outcome));
     }
 }
@@ -188,7 +256,8 @@ pub async fn run_tui_shell(
 ) -> Result<(), String> {
     println!("[tui] streaming mode (non-fullscreen)");
 
-    let sink: Arc<dyn EventSink> = Arc::new(StreamingTuiEventSink::stdout());
+    let streaming_sink = Arc::new(StreamingTuiEventSink::stdout());
+    let sink: Arc<dyn EventSink> = streaming_sink.clone();
     let local_session_id = format!("{}-session", args.tab_id);
 
     let tool_runtime_state = Arc::clone(&runtime_state);
@@ -210,9 +279,14 @@ pub async fn run_tui_shell(
     let repl_resolved = resolved.clone();
     let repl_runtime_state = Arc::clone(&runtime_state);
     let repl_sink = Arc::clone(&sink);
+    let repl_streaming_sink_for_prompt = Arc::clone(&streaming_sink);
+    let repl_streaming_sink_for_submit = Arc::clone(&streaming_sink);
     let repl_tool_executor = Arc::clone(&tool_executor);
 
-    repl::run_repl(reader, &mut stdout, move |prompt| {
+    let mut reader = reader;
+    repl::run_repl_with_prompt(&mut reader, &mut stdout, move || {
+        repl_streaming_sink_for_prompt.prompt_prefix().to_string()
+    }, move |prompt| {
         match command_router::parse_repl_command(&prompt) {
             ReplCommand::Help => {
                 render_help_panel();
@@ -236,12 +310,16 @@ pub async fn run_tui_shell(
             ReplCommand::ApproveShellOnce => {
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
+                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
                 return Box::pin(async move {
                     match runtime_state
                         .set_tool_approval(&tab_id, "run_shell_command", "allow_once")
                         .await
                     {
-                        Ok(()) => println!("Approved shell for one command in this session."),
+                        Ok(()) => {
+                            streaming_sink.set_status(UiSessionStatus::Idle);
+                            println!("Approved shell for one command in this session.");
+                        }
                         Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
                     Ok(())
@@ -250,12 +328,16 @@ pub async fn run_tui_shell(
             ReplCommand::ApproveShellSession => {
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
+                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
                 return Box::pin(async move {
                     match runtime_state
                         .set_tool_approval(&tab_id, "run_shell_command", "allow_session")
                         .await
                     {
-                        Ok(()) => println!("Approved shell for this session."),
+                        Ok(()) => {
+                            streaming_sink.set_status(UiSessionStatus::Idle);
+                            println!("Approved shell for this session.");
+                        }
                         Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
                     Ok(())
@@ -264,12 +346,16 @@ pub async fn run_tui_shell(
             ReplCommand::ApproveShellDeny => {
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
+                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
                 return Box::pin(async move {
                     match runtime_state
                         .set_tool_approval(&tab_id, "run_shell_command", "deny_session")
                         .await
                     {
-                        Ok(()) => println!("Denied shell for this session."),
+                        Ok(()) => {
+                            streaming_sink.set_status(UiSessionStatus::Idle);
+                            println!("Denied shell for this session.");
+                        }
                         Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
                     Ok(())
@@ -343,8 +429,7 @@ pub async fn run_tui_shell(
             }
             Ok(())
         })
-    })
-    .await
+    }).await
 }
 
 #[cfg(test)]
@@ -396,5 +481,50 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.contains("[streaming] connected"));
+    }
+
+    #[test]
+    fn status_moves_to_waiting_on_approval_and_suspended_complete() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::ToolResult(AgentToolResultEvent {
+                tool_name: "run_shell_command".to_string(),
+                call_id: "call-2".to_string(),
+                is_error: true,
+                preview: "run_shell_command requires approval".to_string(),
+                content: serde_json::json!({"approvalRequired": true}),
+                display: serde_json::Value::Null,
+            }),
+        });
+        assert_eq!(sink.session_status(), UiSessionStatus::WaitingApproval);
+        assert_eq!(sink.prompt_prefix(), "(approval)> ");
+
+        sink.emit_complete(&AgentCompletePayload {
+            tab_id: "t1".to_string(),
+            outcome: "suspended".to_string(),
+        });
+        assert_eq!(sink.session_status(), UiSessionStatus::WaitingApproval);
+        assert_eq!(sink.prompt_prefix(), "(approval)> ");
+    }
+
+    #[test]
+    fn status_returns_to_idle_after_non_suspended_complete() {
+        let sink = StreamingTuiEventSink::for_test();
+        sink.emit_event(&AgentEventEnvelope {
+            tab_id: "t1".to_string(),
+            payload: AgentEventPayload::Status(AgentStatusEvent {
+                stage: "streaming".to_string(),
+                message: "connected".to_string(),
+            }),
+        });
+        assert_eq!(sink.session_status(), UiSessionStatus::Busy);
+
+        sink.emit_complete(&AgentCompletePayload {
+            tab_id: "t1".to_string(),
+            outcome: "completed".to_string(),
+        });
+        assert_eq!(sink.session_status(), UiSessionStatus::Idle);
+        assert_eq!(sink.prompt_prefix(), "> ");
     }
 }

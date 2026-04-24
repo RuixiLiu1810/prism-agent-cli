@@ -25,17 +25,33 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub async fn run_repl<R, W, H>(
     mut reader: R,
     writer: &mut W,
-    mut on_submit: H,
+    on_submit: H,
 ) -> Result<(), String>
 where
     R: BufRead,
     W: Write,
     H: FnMut(String) -> BoxFuture<Result<(), String>>,
 {
+    run_repl_with_prompt(&mut reader, writer, || "> ".to_string(), on_submit).await
+}
+
+pub async fn run_repl_with_prompt<R, W, P, H>(
+    reader: &mut R,
+    writer: &mut W,
+    mut prompt_provider: P,
+    mut on_submit: H,
+) -> Result<(), String>
+where
+    R: BufRead,
+    W: Write,
+    P: FnMut() -> String,
+    H: FnMut(String) -> BoxFuture<Result<(), String>>,
+{
     let mut line = String::new();
     loop {
         line.clear();
-        write!(writer, "> ").map_err(|e| format!("failed to write prompt: {}", e))?;
+        let prompt = prompt_provider();
+        write!(writer, "{}", prompt).map_err(|e| format!("failed to write prompt: {}", e))?;
         writer
             .flush()
             .map_err(|e| format!("failed to flush prompt: {}", e))?;
