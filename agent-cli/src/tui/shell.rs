@@ -15,7 +15,7 @@ use crate::config_model::ResolvedConfig;
 use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
 use crate::tui::icons::{reduced_motion_enabled, Icons};
-use crate::tui::layout::{render_slots, Slot, SlotLine};
+use crate::tui::layout::{render_header_block, render_notice_line, render_slots, Slot, SlotLine};
 use crate::tui::suggestions::render_command_suggestions;
 use crate::tui::theme::{Role, Theme};
 use crate::{tool_executor, turn_runner};
@@ -30,6 +30,21 @@ enum UiSessionStatus {
     Idle,
     Busy,
     WaitingApproval,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SessionChromeState {
+    rendered_for: Option<String>,
+}
+
+impl SessionChromeState {
+    fn should_render(&self, session_id: &str) -> bool {
+        self.rendered_for.as_deref() != Some(session_id)
+    }
+
+    fn mark_rendered(&mut self, session_id: &str) {
+        self.rendered_for = Some(session_id.to_string());
+    }
 }
 
 struct StreamingTuiEventSink {
@@ -352,6 +367,27 @@ pub async fn run_tui_shell(
     let streaming_sink = Arc::new(StreamingTuiEventSink::stdout());
     let sink: Arc<dyn EventSink> = streaming_sink.clone();
     let local_session_id = format!("{}-session", args.tab_id);
+    let mut chrome_state = SessionChromeState::default();
+
+    if chrome_state.should_render(&local_session_id) {
+        let tool_mode_label = match tool_mode {
+            ToolMode::Off => "tools off",
+            ToolMode::Safe => "tools safe",
+        };
+        let model_line = format!("{} · {}", resolved.model, tool_mode_label);
+        for line in render_header_block(
+            "Claude Prism",
+            &format!("v{}", env!("CARGO_PKG_VERSION")),
+            &model_line,
+            &args.project_path,
+        ) {
+            streaming_sink.write_human(&(line + "\n"));
+        }
+        streaming_sink.write_human("\n");
+        let notice = render_notice_line("Session ready", "/commands for help");
+        streaming_sink.write_human(&(notice + "\n\n"));
+        chrome_state.mark_rendered(&local_session_id);
+    }
 
     let tool_runtime_state = Arc::clone(&runtime_state);
     let tool_tab_id = args.tab_id.clone();
@@ -661,5 +697,20 @@ mod tests {
             .find("[turn:completed]")
             .unwrap_or_else(|| panic!("missing completed outcome"));
         assert!(completed > suspended);
+    }
+
+    #[test]
+    fn header_renders_once_for_same_session() {
+        let mut chrome = SessionChromeState::default();
+        assert!(chrome.should_render("tab-a-session"));
+        chrome.mark_rendered("tab-a-session");
+        assert!(!chrome.should_render("tab-a-session"));
+    }
+
+    #[test]
+    fn header_rerenders_on_session_switch() {
+        let mut chrome = SessionChromeState::default();
+        chrome.mark_rendered("tab-a-session");
+        assert!(chrome.should_render("tab-b-session"));
     }
 }
