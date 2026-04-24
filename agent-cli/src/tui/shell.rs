@@ -128,7 +128,9 @@ impl StreamingTuiEventSink {
             return None;
         }
         let (width, height) = crossterm::terminal::size().ok()?;
-        if width < 8 || height < 4 {
+        // Keep enough vertical room for header + notice + transcript area; otherwise
+        // a pinned bar can overwrite startup chrome (including the notice line).
+        if width < 8 || height < 12 {
             return None;
         }
         let width = (width as usize).saturating_sub(1).max(1);
