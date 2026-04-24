@@ -91,7 +91,7 @@ mod tests {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.apply_update(ViewUpdate::Semantic {
             text: "Read src/main.rs".to_string(),
-            detail: "tool=read_file path=src/main.rs".to_string(),
+            details: vec!["tool=read_file path=src/main.rs".to_string()],
         });
         vm.focus = UiFocus::Timeline;
         vm.selected_line = 0;

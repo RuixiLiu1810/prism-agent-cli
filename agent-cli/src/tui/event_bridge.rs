@@ -53,10 +53,10 @@ pub fn map_payload(payload: &AgentEventPayload) -> Option<ViewUpdate> {
             } else {
                 Some(ViewUpdate::Semantic {
                     text: result.preview.clone(),
-                    detail: format!(
+                    details: vec![format!(
                         "tool={} call_id={} is_error={}",
                         result.tool_name, result.call_id, result.is_error
-                    ),
+                    )],
                 })
             }
         }
@@ -65,16 +65,27 @@ pub fn map_payload(payload: &AgentEventPayload) -> Option<ViewUpdate> {
             if status.stage == "awaiting_approval" {
                 Some(ViewUpdate::WaitingApproval(status.message.clone()))
             } else {
-                None
+                Some(ViewUpdate::Semantic {
+                    text: format!("[{}] {}", status.stage, status.message),
+                    details: Vec::new(),
+                })
             }
         }
         _ => None,
     }
 }
 
+pub fn map_complete(payload: &AgentCompletePayload) -> Option<ViewUpdate> {
+    if payload.outcome.is_empty() {
+        None
+    } else {
+        Some(ViewUpdate::TurnOutcome(payload.outcome.clone()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use agent_core::{AgentErrorEvent, AgentToolResultEvent};
+    use agent_core::{AgentErrorEvent, AgentStatusEvent, AgentToolResultEvent};
 
     use super::*;
 
@@ -115,5 +126,25 @@ mod tests {
         });
         let update = map_payload(&payload).unwrap_or_else(|| panic!("must map"));
         assert!(matches!(update, ViewUpdate::Error(_)));
+    }
+
+    #[test]
+    fn maps_non_waiting_status_to_semantic_update() {
+        let payload = AgentEventPayload::Status(AgentStatusEvent {
+            stage: "streaming".to_string(),
+            message: "connected".to_string(),
+        });
+        let update = map_payload(&payload).unwrap_or_else(|| panic!("must map"));
+        assert!(matches!(update, ViewUpdate::Semantic { .. }));
+    }
+
+    #[test]
+    fn maps_complete_into_turn_outcome() {
+        let complete = AgentCompletePayload {
+            tab_id: "tab-1".to_string(),
+            outcome: "suspended".to_string(),
+        };
+        let update = map_complete(&complete).unwrap_or_else(|| panic!("must map"));
+        assert_eq!(update, ViewUpdate::TurnOutcome("suspended".to_string()));
     }
 }
