@@ -56,7 +56,10 @@ pub fn render_frame(
         out.push(String::new());
     }
     out.push("─".repeat(width_usize));
-    out.push(truncate_to_width(&format!("> {}", vm.input_buffer), width_usize));
+    out.push(truncate_to_width(
+        &format!("> {}", vm.input_buffer()),
+        width_usize,
+    ));
     out
 }
 

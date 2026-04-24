@@ -1,3 +1,5 @@
+use super::history_search::HistorySearch;
+use super::input_buffer::InputBuffer;
 use super::types::{UiFocus, UiLine, UiLineKind, ViewUpdate};
 
 pub struct TuiViewModel {
@@ -5,9 +7,8 @@ pub struct TuiViewModel {
     pub lines: Vec<UiLine>,
     pub focus: UiFocus,
     pub selected_line: usize,
-    pub input_buffer: String,
-    pub input_history: Vec<String>,
-    pub history_cursor: Option<usize>,
+    pub input: InputBuffer,
+    pub history: HistorySearch,
     pub waiting_for_approval: bool,
 }
 
@@ -18,16 +19,14 @@ impl TuiViewModel {
             lines: Vec::new(),
             focus: UiFocus::Input,
             selected_line: 0,
-            input_buffer: String::new(),
-            input_history: Vec::new(),
-            history_cursor: None,
+            input: InputBuffer::default(),
+            history: HistorySearch::default(),
             waiting_for_approval: false,
         }
     }
 
     pub fn push_user_prompt(&mut self, prompt: String) {
-        self.input_history.push(prompt.clone());
-        self.history_cursor = None;
+        self.history.record(prompt.clone());
         self.lines.push(UiLine {
             kind: UiLineKind::User,
             prefix: "›".to_string(),
@@ -87,6 +86,10 @@ impl TuiViewModel {
                 line.expanded = !line.expanded;
             }
         }
+    }
+
+    pub fn input_buffer(&self) -> &str {
+        self.input.current()
     }
 }
 

@@ -6,7 +6,11 @@ pub mod shell;
 #[cfg(test)]
 pub mod event_bridge;
 #[cfg(test)]
+pub mod history_search;
+#[cfg(test)]
 pub mod input;
+#[cfg(test)]
+pub mod input_buffer;
 #[cfg(test)]
 pub mod renderer;
 #[cfg(test)]
