@@ -51,6 +51,7 @@ impl SessionChromeState {
 struct StreamingTuiEventSink {
     writer: Mutex<Vec<u8>>,
     mirror_stdout: bool,
+    fixed_input_bar: bool,
     session_status: Mutex<UiSessionStatus>,
     icons: Icons,
     theme: Theme,
@@ -62,9 +63,11 @@ struct StreamingTuiEventSink {
 
 impl StreamingTuiEventSink {
     fn stdout() -> Self {
+        let fixed_input_bar = io::stdout().is_terminal();
         Self {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: true,
+            fixed_input_bar,
             session_status: Mutex::new(UiSessionStatus::Idle),
             icons: Icons::detect(),
             theme: Theme::detect(),
@@ -80,6 +83,7 @@ impl StreamingTuiEventSink {
         Self {
             writer: Mutex::new(Vec::new()),
             mirror_stdout: false,
+            fixed_input_bar: false,
             session_status: Mutex::new(UiSessionStatus::Idle),
             icons: Icons::detect(),
             theme: Theme { enable_color: false },
@@ -116,6 +120,31 @@ impl StreamingTuiEventSink {
         crossterm::terminal::size()
             .map(|(width, _)| width as usize)
             .unwrap_or(120)
+    }
+
+    fn fixed_bar_layout(&self) -> Option<(usize, u16, u16, u16, u16)> {
+        if !(self.fixed_input_bar && self.mirror_stdout) {
+            return None;
+        }
+        let (width, height) = crossterm::terminal::size().ok()?;
+        if width < 8 || height < 4 {
+            return None;
+        }
+        let width = (width as usize).saturating_sub(1).max(1);
+        let scroll_bottom = height.saturating_sub(3).max(1);
+        let top_row = height.saturating_sub(2);
+        let input_row = height.saturating_sub(1);
+        let bottom_row = height;
+        Some((width, scroll_bottom, top_row, input_row, bottom_row))
+    }
+
+    fn draw_fixed_input_bar(&self) {
+        if let Some((width, scroll_bottom, top_row, input_row, bottom_row)) = self.fixed_bar_layout() {
+            let border = self.theme.paint(Role::Subtle, "─".repeat(width));
+            self.write_human(&format!(
+                "\x1b[1;{scroll_bottom}r\x1b[{top_row};1H\x1b[2K{border}\x1b[{input_row};1H\x1b[2K› \x1b[{bottom_row};1H\x1b[2K{border}\x1b[{input_row};3H"
+            ));
+        }
     }
 
     fn reset_assistant_stream(&self) {
@@ -189,40 +218,20 @@ impl StreamingTuiEventSink {
     }
 
     fn render_input_frame_prompt(&self) -> String {
-        if self.mirror_stdout && io::stdout().is_terminal() {
-            if let Ok((width, height)) = crossterm::terminal::size() {
-                if height >= 4 && width >= 8 {
-                    let width = (width as usize).saturating_sub(1).max(1);
-                    let top_row = height.saturating_sub(2);
-                    let input_row = height.saturating_sub(1);
-                    let bottom_row = height;
-                    let border = self.theme.paint(Role::Subtle, "─".repeat(width));
-                    self.write_human(&format!(
-                        "\x1b[{top_row};1H\x1b[2K{border}\x1b[{input_row};1H\x1b[2K› \x1b[{bottom_row};1H\x1b[2K{border}\x1b[{input_row};3H"
-                    ));
-                    return String::new();
-                }
-            }
-            self.prompt_prefix().to_string()
+        if self.fixed_bar_layout().is_some() {
+            self.draw_fixed_input_bar();
+            String::new()
         } else {
             self.prompt_prefix().to_string()
         }
     }
 
-    fn clear_input_frame_after_submit(&self) {
-        if self.mirror_stdout && io::stdout().is_terminal() {
-            if let Ok((_, height)) = crossterm::terminal::size() {
-                if height >= 4 {
-                    let top_row = height.saturating_sub(2);
-                    let input_row = height.saturating_sub(1);
-                    let bottom_row = height;
-                    // Clear the bottom input bar and place cursor at the former top
-                    // border row so transcript output continues above the bar area.
-                    self.write_human(&format!(
-                        "\x1b[{top_row};1H\x1b[2K\x1b[{input_row};1H\x1b[2K\x1b[{bottom_row};1H\x1b[2K\x1b[{top_row};1H"
-                    ));
-                }
-            }
+    fn prepare_transcript_output(&self) {
+        if let Some((_, scroll_bottom, _, input_row, _)) = self.fixed_bar_layout() {
+            self.write_human(&format!("\x1b[{input_row};1H\x1b[2K\x1b[{scroll_bottom};1H"));
+        } else if self.mirror_stdout && io::stdout().is_terminal() {
+            // Fallback for non-fixed-bar terminals: clear prompt echo line.
+            self.write_human("\x1b[1A\r\x1b[2K");
         }
     }
 
@@ -546,26 +555,26 @@ pub async fn run_tui_shell(
     let repl_tool_executor = Arc::clone(&tool_executor);
 
     let mut reader = reader;
-    repl::run_repl_with_prompt(&mut reader, &mut stdout, move || {
+    let repl_result = repl::run_repl_with_prompt(&mut reader, &mut stdout, move || {
         repl_streaming_sink_for_prompt.render_input_frame_prompt()
     }, move |prompt| {
         match command_router::parse_repl_command(&prompt) {
             ReplCommand::None => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 repl_streaming_sink_for_submit.render_user_prompt(&prompt);
             }
             ReplCommand::Help => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 render_help_panel();
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::Commands => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 render_commands_panel();
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::Status => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 let snapshot = CliStatusSnapshot::collect(
                     &repl_resolved.provider,
                     &repl_resolved.model,
@@ -577,7 +586,7 @@ pub async fn run_tui_shell(
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::ApproveShellOnce => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -596,7 +605,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::ApproveShellSession => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -615,7 +624,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::ApproveShellDeny => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -634,7 +643,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::Unknown { raw, suggestion } => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 if let Some(suggestion) = suggestion {
                     println!("Unknown command: {}. Did you mean {}?", raw, suggestion);
                 } else {
@@ -649,7 +658,7 @@ pub async fn run_tui_shell(
             | ReplCommand::Clear
             | ReplCommand::ModelShow
             | ReplCommand::ModelSet(_) => {
-                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
+                repl_streaming_sink_for_submit.prepare_transcript_output();
                 println!("Command is not available in streaming tui mode yet. Use --ui-mode classic.");
                 return Box::pin(async { Ok(()) });
             }
@@ -705,7 +714,13 @@ pub async fn run_tui_shell(
             }
             Ok(())
         })
-    }).await
+    }).await;
+
+    if streaming_sink.fixed_bar_layout().is_some() {
+        streaming_sink.write_human("\x1b[r\n");
+    }
+
+    repl_result
 }
 
 #[cfg(test)]
