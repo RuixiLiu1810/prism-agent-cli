@@ -6,6 +6,7 @@ pub enum Role {
     Warning,
     Error,
     Accent,
+    CommandRowBg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,7 @@ impl Theme {
             Role::Warning => "33",
             Role::Error => "31",
             Role::Accent => "36",
+            Role::CommandRowBg => "48;5;252;30",
         };
         format!("\x1b[{}m{}\x1b[0m", code, text)
     }
@@ -59,5 +61,12 @@ mod tests {
         let output = theme.paint(Role::Success, "ok");
         assert!(output.contains("\x1b[32m"));
         assert!(output.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn paint_command_row_bg_uses_background_ansi_code() {
+        let theme = Theme { enable_color: true };
+        let output = theme.paint(Role::CommandRowBg, "› who are you");
+        assert!(output.contains("\x1b[48;"));
     }
 }

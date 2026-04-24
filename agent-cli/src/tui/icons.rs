@@ -9,6 +9,10 @@ pub struct Icons {
 }
 
 impl Icons {
+    pub fn project_logo() -> &'static str {
+        "███  ███\n██ ██ ██\n██    ██\n████████\n██    ██\n██    ██"
+    }
+
     pub fn detect() -> Self {
         if prefers_ascii() {
             Self {
@@ -65,6 +69,13 @@ fn prefers_ascii() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Icons, reduced_motion_enabled};
+
+    #[test]
+    fn project_logo_is_unicode_pixel_block() {
+        let logo = Icons::project_logo();
+        assert_eq!(logo.lines().count(), 6);
+        assert!(logo.contains("█"));
+    }
 
     #[test]
     fn spinner_uses_static_frame_when_reduced_motion() {
