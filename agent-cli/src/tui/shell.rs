@@ -188,11 +188,22 @@ impl StreamingTuiEventSink {
         }
     }
 
-    fn clear_submitted_prompt_echo(&self) {
+    fn render_input_frame_prompt(&self) -> String {
         if self.mirror_stdout && io::stdout().is_terminal() {
-            // Canonical-mode terminals echo the submitted input line. Clear it so
-            // transcript history keeps only the styled command row.
-            self.write_human("\x1b[1A\r\x1b[2K");
+            let width = Self::terminal_width_or_default().max(16);
+            let border = self.theme.paint(Role::Subtle, "─".repeat(width));
+            // Save/restore cursor so the bottom border stays visible while typing.
+            format!("{border}\n› \x1b[s\n{border}\x1b[u")
+        } else {
+            self.prompt_prefix().to_string()
+        }
+    }
+
+    fn clear_input_frame_after_submit(&self) {
+        if self.mirror_stdout && io::stdout().is_terminal() {
+            // Enter leaves cursor on the bottom border line. Clear bottom border,
+            // prompt line, then top border before rendering transcript history.
+            self.write_human("\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K");
         }
     }
 
@@ -517,22 +528,25 @@ pub async fn run_tui_shell(
 
     let mut reader = reader;
     repl::run_repl_with_prompt(&mut reader, &mut stdout, move || {
-        repl_streaming_sink_for_prompt.prompt_prefix().to_string()
+        repl_streaming_sink_for_prompt.render_input_frame_prompt()
     }, move |prompt| {
         match command_router::parse_repl_command(&prompt) {
             ReplCommand::None => {
-                repl_streaming_sink_for_submit.clear_submitted_prompt_echo();
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 repl_streaming_sink_for_submit.render_user_prompt(&prompt);
             }
             ReplCommand::Help => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 render_help_panel();
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::Commands => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 render_commands_panel();
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::Status => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 let snapshot = CliStatusSnapshot::collect(
                     &repl_resolved.provider,
                     &repl_resolved.model,
@@ -544,6 +558,7 @@ pub async fn run_tui_shell(
                 return Box::pin(async { Ok(()) });
             }
             ReplCommand::ApproveShellOnce => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -562,6 +577,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::ApproveShellSession => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -580,6 +596,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::ApproveShellDeny => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
@@ -598,6 +615,7 @@ pub async fn run_tui_shell(
                 });
             }
             ReplCommand::Unknown { raw, suggestion } => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 if let Some(suggestion) = suggestion {
                     println!("Unknown command: {}. Did you mean {}?", raw, suggestion);
                 } else {
@@ -612,6 +630,7 @@ pub async fn run_tui_shell(
             | ReplCommand::Clear
             | ReplCommand::ModelShow
             | ReplCommand::ModelSet(_) => {
+                repl_streaming_sink_for_submit.clear_input_frame_after_submit();
                 println!("Command is not available in streaming tui mode yet. Use --ui-mode classic.");
                 return Box::pin(async { Ok(()) });
             }
@@ -838,6 +857,13 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.starts_with("● Hello"));
+    }
+
+    #[test]
+    fn prompt_frame_falls_back_to_plain_prefix_without_tty() {
+        let sink = StreamingTuiEventSink::for_test();
+        let prompt = sink.render_input_frame_prompt();
+        assert_eq!(prompt, "› ");
     }
 
     #[test]
