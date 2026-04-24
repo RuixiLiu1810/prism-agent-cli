@@ -1,3 +1,6 @@
+use super::history_search::HistorySearch;
+use super::input_buffer::InputBuffer;
+use super::transcript::{append_assistant_delta, append_semantic};
 use super::types::{UiFocus, UiLine, UiLineKind, ViewUpdate};
 
 pub struct TuiViewModel {
@@ -5,9 +8,8 @@ pub struct TuiViewModel {
     pub lines: Vec<UiLine>,
     pub focus: UiFocus,
     pub selected_line: usize,
-    pub input_buffer: String,
-    pub input_history: Vec<String>,
-    pub history_cursor: Option<usize>,
+    pub input: InputBuffer,
+    pub history: HistorySearch,
     pub waiting_for_approval: bool,
 }
 
@@ -18,16 +20,14 @@ impl TuiViewModel {
             lines: Vec::new(),
             focus: UiFocus::Input,
             selected_line: 0,
-            input_buffer: String::new(),
-            input_history: Vec::new(),
-            history_cursor: None,
+            input: InputBuffer::default(),
+            history: HistorySearch::default(),
             waiting_for_approval: false,
         }
     }
 
     pub fn push_user_prompt(&mut self, prompt: String) {
-        self.input_history.push(prompt.clone());
-        self.history_cursor = None;
+        self.history.record(prompt.clone());
         self.lines.push(UiLine {
             kind: UiLineKind::User,
             prefix: "›".to_string(),
@@ -40,29 +40,17 @@ impl TuiViewModel {
 
     pub fn apply_update(&mut self, update: ViewUpdate) {
         match update {
-            ViewUpdate::AssistantDelta(delta) => self.lines.push(UiLine {
-                kind: UiLineKind::Assistant,
-                prefix: "●".to_string(),
-                text: delta,
-                details: Vec::new(),
-                expanded: false,
-            }),
-            ViewUpdate::Semantic { text, detail } => self.lines.push(UiLine {
-                kind: UiLineKind::Semantic,
-                prefix: "└".to_string(),
-                text,
-                details: vec![detail],
-                expanded: false,
-            }),
+            ViewUpdate::AssistantDelta(delta) => append_assistant_delta(&mut self.lines, delta),
+            ViewUpdate::Semantic { text, details } => {
+                append_semantic(&mut self.lines, text, details)
+            }
             ViewUpdate::WaitingApproval(hint) => {
                 self.waiting_for_approval = true;
-                self.lines.push(UiLine {
-                    kind: UiLineKind::Semantic,
-                    prefix: "└".to_string(),
-                    text: "Waiting for approval".to_string(),
-                    details: vec![hint],
-                    expanded: false,
-                });
+                append_semantic(
+                    &mut self.lines,
+                    "Waiting for approval".to_string(),
+                    vec![hint],
+                );
             }
             ViewUpdate::TurnOutcome(outcome) => {
                 self.waiting_for_approval = outcome == "suspended";
@@ -88,6 +76,10 @@ impl TuiViewModel {
             }
         }
     }
+
+    pub fn input_buffer(&self) -> &str {
+        self.input.current()
+    }
 }
 
 #[cfg(test)]
@@ -99,14 +91,16 @@ mod tests {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.push_user_prompt("read one file".to_string());
         vm.apply_update(ViewUpdate::AssistantDelta("I will inspect now.".to_string()));
+        vm.apply_update(ViewUpdate::AssistantDelta(" by listing files.".to_string()));
         vm.apply_update(ViewUpdate::Semantic {
             text: "Read 1 file".to_string(),
-            detail: "tool=read_file path=src/main.rs".to_string(),
+            details: vec!["tool=read_file path=src/main.rs".to_string()],
         });
 
         assert_eq!(vm.lines.len(), 3);
         assert_eq!(vm.lines[0].prefix, "›");
         assert_eq!(vm.lines[1].prefix, "●");
+        assert_eq!(vm.lines[1].text, "I will inspect now. by listing files.");
         assert_eq!(vm.lines[2].prefix, "└");
     }
 
@@ -115,11 +109,25 @@ mod tests {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.apply_update(ViewUpdate::Semantic {
             text: "Waiting for approval".to_string(),
-            detail: "run /approve shell once".to_string(),
+            details: vec!["run /approve shell once".to_string()],
         });
         vm.focus = UiFocus::Timeline;
         vm.selected_line = 0;
         vm.toggle_detail();
         assert!(vm.lines[0].expanded);
+    }
+
+    #[test]
+    fn keeps_session_id_and_supports_system_line_kind() {
+        let mut vm = TuiViewModel::new("session-42".to_string());
+        assert_eq!(vm.session_id, "session-42");
+        vm.lines.push(UiLine {
+            kind: UiLineKind::System,
+            prefix: "i".to_string(),
+            text: "system message".to_string(),
+            details: Vec::new(),
+            expanded: false,
+        });
+        assert_eq!(vm.lines[0].kind, UiLineKind::System);
     }
 }

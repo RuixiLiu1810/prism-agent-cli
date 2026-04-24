@@ -56,7 +56,10 @@ pub fn render_frame(
         out.push(String::new());
     }
     out.push("─".repeat(width_usize));
-    out.push(truncate_to_width(&format!("> {}", vm.input_buffer), width_usize));
+    out.push(truncate_to_width(
+        &format!("> {}", vm.input_buffer()),
+        width_usize,
+    ));
     out
 }
 
@@ -88,7 +91,7 @@ mod tests {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.apply_update(ViewUpdate::Semantic {
             text: "Read src/main.rs".to_string(),
-            detail: "tool=read_file path=src/main.rs".to_string(),
+            details: vec!["tool=read_file path=src/main.rs".to_string()],
         });
         vm.focus = UiFocus::Timeline;
         vm.selected_line = 0;

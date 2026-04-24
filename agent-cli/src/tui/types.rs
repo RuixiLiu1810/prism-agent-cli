@@ -9,6 +9,7 @@ pub enum UiLineKind {
     User,
     Assistant,
     Semantic,
+    System,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +24,7 @@ pub struct UiLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewUpdate {
     AssistantDelta(String),
-    Semantic { text: String, detail: String },
+    Semantic { text: String, details: Vec<String> },
     WaitingApproval(String),
     TurnOutcome(String),
     Error(String),

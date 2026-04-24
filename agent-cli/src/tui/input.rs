@@ -10,6 +10,8 @@ pub enum UiAction {
     InsertChar(char),
     HistoryUp,
     HistoryDown,
+    StartHistorySearch,
+    Undo,
     FocusNextLine,
     FocusPrevLine,
     ToggleDetail,
@@ -25,6 +27,8 @@ pub fn to_action(key: KeyEvent) -> Option<UiAction> {
         (KeyCode::Backspace, _) => Some(UiAction::Backspace),
         (KeyCode::Up, _) => Some(UiAction::HistoryUp),
         (KeyCode::Down, _) => Some(UiAction::HistoryDown),
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(UiAction::StartHistorySearch),
+        (KeyCode::Char('z'), KeyModifiers::CONTROL) => Some(UiAction::Undo),
         (KeyCode::Esc, _) => Some(UiAction::FocusInput),
         (KeyCode::Tab, _) => Some(UiAction::ToggleDetail),
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => Some(UiAction::ClearScreen),
@@ -39,11 +43,11 @@ pub fn to_action(key: KeyEvent) -> Option<UiAction> {
 pub fn apply_input_action(vm: &mut TuiViewModel, action: UiAction) -> Option<String> {
     match action {
         UiAction::InsertChar(ch) => {
-            vm.input_buffer.push(ch);
+            vm.input.insert_char(ch);
             None
         }
         UiAction::Backspace => {
-            vm.input_buffer.pop();
+            vm.input.backspace();
             None
         }
         UiAction::Enter => {
@@ -51,41 +55,30 @@ pub fn apply_input_action(vm: &mut TuiViewModel, action: UiAction) -> Option<Str
                 vm.toggle_detail();
                 return None;
             }
-            let prompt = vm.input_buffer.trim().to_string();
-            vm.input_buffer.clear();
-            if prompt.is_empty() { None } else { Some(prompt) }
+            vm.input.submit_trimmed()
         }
         UiAction::HistoryUp => {
-            if vm.input_history.is_empty() {
-                return None;
-            }
-            let next = match vm.history_cursor {
-                Some(cursor) if cursor > 0 => cursor - 1,
-                Some(cursor) => cursor,
-                None => vm.input_history.len().saturating_sub(1),
-            };
-            vm.history_cursor = Some(next);
-            if let Some(value) = vm.input_history.get(next) {
-                vm.input_buffer = value.clone();
+            let current = vm.input.current().to_string();
+            if let Some(value) = vm.history.up(&current) {
+                vm.input.replace(value);
             }
             None
         }
         UiAction::HistoryDown => {
-            if vm.input_history.is_empty() {
-                return None;
+            if let Some(value) = vm.history.down() {
+                vm.input.replace(value);
             }
-            if let Some(cursor) = vm.history_cursor {
-                let next = cursor.saturating_add(1);
-                if next >= vm.input_history.len() {
-                    vm.history_cursor = None;
-                    vm.input_buffer.clear();
-                } else {
-                    vm.history_cursor = Some(next);
-                    if let Some(value) = vm.input_history.get(next) {
-                        vm.input_buffer = value.clone();
-                    }
-                }
+            None
+        }
+        UiAction::StartHistorySearch => {
+            let current = vm.input.current().to_string();
+            if let Some(value) = vm.history.start_reverse_search(current) {
+                vm.input.replace(value);
             }
+            None
+        }
+        UiAction::Undo => {
+            vm.input.undo();
             None
         }
         UiAction::FocusNextLine => {
@@ -113,6 +106,7 @@ pub fn apply_input_action(vm: &mut TuiViewModel, action: UiAction) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::view_model::TuiViewModel;
 
     #[test]
     fn maps_ctrl_j_and_ctrl_k_to_timeline_navigation() {
@@ -126,5 +120,27 @@ mod tests {
     fn maps_enter_to_submit_when_input_focused() {
         let action = to_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(action, Some(UiAction::Enter));
+    }
+
+    #[test]
+    fn history_up_down_restores_draft_input() {
+        let mut vm = TuiViewModel::new("session-1".to_string());
+        vm.push_user_prompt("first".to_string());
+        vm.push_user_prompt("second".to_string());
+        vm.input.replace("draft");
+
+        apply_input_action(&mut vm, UiAction::HistoryUp);
+        assert_eq!(vm.input.current(), "second");
+        apply_input_action(&mut vm, UiAction::HistoryDown);
+        assert_eq!(vm.input.current(), "draft");
+    }
+
+    #[test]
+    fn ctrl_z_undo_reverts_last_input_edit() {
+        let mut vm = TuiViewModel::new("session-1".to_string());
+        apply_input_action(&mut vm, UiAction::InsertChar('a'));
+        apply_input_action(&mut vm, UiAction::InsertChar('b'));
+        apply_input_action(&mut vm, UiAction::Undo);
+        assert_eq!(vm.input.current(), "a");
     }
 }

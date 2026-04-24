@@ -1,4 +1,4 @@
-const KNOWN_COMMANDS: &[&str] = &[
+pub(crate) const KNOWN_COMMANDS: &[&str] = &[
     "/help",
     "/commands",
     "/config",
@@ -88,6 +88,53 @@ fn suggest_command(raw: &str) -> Option<&'static str> {
     best.map(|(_, candidate)| candidate)
 }
 
+pub fn suggest_commands(prefix: &str, limit: usize) -> Vec<&'static str> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return KNOWN_COMMANDS.iter().copied().take(limit).collect();
+    }
+
+    let mut starts_with: Vec<&'static str> = KNOWN_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(trimmed))
+        .collect();
+    starts_with.sort_unstable();
+
+    if !starts_with.is_empty() {
+        starts_with.truncate(limit);
+        return starts_with;
+    }
+
+    let mut fuzzy = KNOWN_COMMANDS
+        .iter()
+        .copied()
+        .filter(|candidate| !starts_with.contains(candidate))
+        .filter_map(|candidate| {
+            let distance = levenshtein(trimmed, candidate);
+            let threshold = trimmed.len().max(candidate.len()).min(4);
+            if distance <= threshold {
+                Some((distance, candidate))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    fuzzy.sort_unstable_by_key(|(distance, candidate)| (*distance, *candidate));
+
+    for (_, candidate) in fuzzy {
+        starts_with.push(candidate);
+        if starts_with.len() >= limit {
+            break;
+        }
+    }
+    starts_with
+}
+
 fn levenshtein(left: &str, right: &str) -> usize {
     if left == right {
         return 0;
@@ -171,5 +218,11 @@ mod tests {
     #[test]
     fn returns_none_for_non_commands() {
         assert_eq!(parse_repl_command("hello"), ReplCommand::None);
+    }
+
+    #[test]
+    fn suggests_prefix_candidates_for_commands() {
+        let suggestions = super::suggest_commands("/ap", 3);
+        assert_eq!(suggestions, vec!["/approve"]);
     }
 }
