@@ -16,6 +16,7 @@ use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
 use crate::tui::icons::{reduced_motion_enabled, Icons};
 use crate::tui::layout::{render_slots, Slot, SlotLine};
+use crate::tui::suggestions::render_command_suggestions;
 use crate::tui::theme::{Role, Theme};
 use crate::{tool_executor, turn_runner};
 
@@ -458,6 +459,9 @@ pub async fn run_tui_shell(
                     println!("Unknown command: {}. Did you mean {}?", raw, suggestion);
                 } else {
                     println!("Unknown command: {}", raw);
+                }
+                if let Some(panel) = render_command_suggestions(&raw, 3) {
+                    println!("{}", panel);
                 }
                 return Box::pin(async { Ok(()) });
             }

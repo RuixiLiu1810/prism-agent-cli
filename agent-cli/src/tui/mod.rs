@@ -1,6 +1,7 @@
 pub mod icons;
 pub mod layout;
 pub mod shell;
+pub mod suggestions;
 pub mod theme;
 
 // Legacy full-screen TUI building blocks are kept for tests/regression
