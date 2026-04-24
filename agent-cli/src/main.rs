@@ -45,7 +45,7 @@ fn should_refresh_header_after_turn(suspended: bool) -> bool {
 }
 
 fn resolve_ui_mode(args: &Args) -> Result<UiMode, String> {
-    args::parse_ui_mode(args.ui_mode.as_deref().unwrap_or("classic"))
+    args::parse_ui_mode(args.ui_mode.as_deref().unwrap_or("tui"))
 }
 
 fn should_use_tui(run_mode: RunMode, output_mode: OutputMode, ui_mode: UiMode) -> bool {
@@ -387,15 +387,6 @@ mod tests {
             OutputMode::Jsonl,
             UiMode::Tui
         ));
-    }
-
-    #[test]
-    fn defaults_to_classic_ui_mode_when_unset() {
-        let args = Args::parse_from(["agent-runtime", "--provider", "minimax", "--model", "MiniMax-M1"]);
-        assert_eq!(
-            resolve_ui_mode(&args).unwrap_or_else(|e| panic!("resolve ui mode failed: {e}")),
-            UiMode::Classic
-        );
     }
 }
 
