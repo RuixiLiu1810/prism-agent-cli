@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use super::{retry_delay_from_headers, AgentTurnOutcome};
+use crate::callchain::{CallSpanStatus, CallSpanType};
 use crate::tools::is_document_tool_name;
 use crate::{
     autocompact_threshold_for_model, build_agent_instructions_with_work_state,
@@ -561,15 +562,72 @@ pub async fn run_turn_loop(
         preflight_compact_messages(sink, &request.tab_id, &runtime.model, &mut next_messages)?;
         tracker.current_round = round_idx;
         budget.ensure_round_available(round_idx)?;
-        let outcome = stream_chat_completions_response_once(
+        let round_span_id = runtime_state
+            .trace_start_span(
+                &request.tab_id,
+                CallSpanType::ProviderRound,
+                "provider_round",
+                None,
+                json!({
+                    "round": round_idx + 1,
+                    "provider": runtime.provider,
+                    "model": runtime.model,
+                }),
+            )
+            .await;
+        let outcome = match stream_chat_completions_response_once(
             sink,
             &runtime,
             request,
             next_messages.clone(),
             budget.clone_abort_rx(),
         )
-        .await?;
-        budget.record_output_text(&outcome.assistant_content)?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Some(round_span_id) = round_span_id {
+                    let _ = runtime_state
+                        .trace_close_span(
+                            &request.tab_id,
+                            &round_span_id,
+                            if err == AGENT_CANCELLED_MESSAGE {
+                                CallSpanStatus::Cancelled
+                            } else {
+                                CallSpanStatus::Error
+                            },
+                            Some(json!({ "error": err })),
+                        )
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+        if let Err(err) = budget.record_output_text(&outcome.assistant_content) {
+            if let Some(round_span_id) = round_span_id {
+                let _ = runtime_state
+                    .trace_close_span(
+                        &request.tab_id,
+                        &round_span_id,
+                        CallSpanStatus::Error,
+                        Some(json!({ "error": err })),
+                    )
+                    .await;
+            }
+            return Err(err);
+        }
+        if let Some(round_span_id) = round_span_id {
+            let _ = runtime_state
+                .trace_close_span(
+                    &request.tab_id,
+                    &round_span_id,
+                    CallSpanStatus::Ok,
+                    Some(json!({
+                        "tool_call_count": outcome.tool_calls.len(),
+                    })),
+                )
+                .await;
+        }
         let raw_assistant = raw_assistant_message(
             &outcome.assistant_content,
             &outcome.reasoning_details,

@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::watch;
 
+use crate::callchain::{CallSpanStatus, CallSpanType};
 use crate::event_sink::EventSink;
 use crate::events::*;
 use crate::instructions::resolve_turn_profile;
@@ -258,12 +259,26 @@ async fn prepare_tool_call(
 }
 
 async fn execute_prepared_tool_call(
+    runtime_state: &AgentRuntimeState,
     request: &AgentTurnDescriptor,
     resolved_profile: &crate::provider::AgentTurnProfile,
     prepared: PreparedToolCall,
     cancel_rx: Option<watch::Receiver<bool>>,
     tool_executor: ToolExecutorFn,
 ) -> (PreparedToolCall, AgentToolResult) {
+    let tool_span_id = runtime_state
+        .trace_start_span(
+            &request.tab_id,
+            CallSpanType::ToolCall,
+            "tool_call",
+            None,
+            json!({
+                "tool_name": prepared.call.tool_name.clone(),
+                "call_id": prepared.call.call_id.clone(),
+                "target": prepared.target.clone(),
+            }),
+        )
+        .await;
     let policy_context = ToolExecutionPolicyContext {
         task_kind: resolved_profile.task_kind.clone(),
         has_binary_attachment_context: request_has_binary_attachment_context(request),
@@ -275,6 +290,31 @@ async fn execute_prepared_tool_call(
     } else {
         tool_executor(prepared.call.clone(), cancel_rx).await
     };
+
+    if let Some(tool_span_id) = tool_span_id {
+        let status = if result.content.get("error").and_then(Value::as_str)
+            == Some(AGENT_CANCELLED_MESSAGE)
+        {
+            CallSpanStatus::Cancelled
+        } else if result.is_error {
+            CallSpanStatus::Error
+        } else if tool_result_requires_approval(&result) {
+            CallSpanStatus::Interrupted
+        } else {
+            CallSpanStatus::Ok
+        };
+        let _ = runtime_state
+            .trace_close_span(
+                &request.tab_id,
+                &tool_span_id,
+                status,
+                Some(json!({
+                    "preview": result.preview,
+                    "is_error": result.is_error,
+                })),
+            )
+            .await;
+    }
 
     (prepared, result)
 }
@@ -370,6 +410,29 @@ async fn handle_tool_result(
         );
     }
     if approval_required {
+        if let Some(span_id) = runtime_state
+            .trace_start_span(
+                &request.tab_id,
+                CallSpanType::ApprovalSuspend,
+                "approval_suspend",
+                None,
+                json!({
+                    "tool_name": result.tool_name,
+                    "call_id": result.call_id,
+                    "target": result_target.clone(),
+                }),
+            )
+            .await
+        {
+            let _ = runtime_state
+                .trace_close_span(
+                    &request.tab_id,
+                    &span_id,
+                    CallSpanStatus::Interrupted,
+                    Some(json!({ "review_ready": review_ready })),
+                )
+                .await;
+        }
         runtime_state
             .mark_pending_state(
                 &request.tab_id,
@@ -495,7 +558,20 @@ pub async fn execute_tool_calls(
             index += 1;
         }
 
-        let mut prepared_calls = Vec::with_capacity(batch.len());
+        let batch_len = batch.len();
+        let batch_span_id = runtime_state
+            .trace_start_span(
+                &request.tab_id,
+                CallSpanType::ToolBatch,
+                "tool_batch",
+                None,
+                json!({
+                    "parallel": parallel_batch,
+                    "count": batch_len,
+                }),
+            )
+            .await;
+        let mut prepared_calls = Vec::with_capacity(batch_len);
         for call in batch {
             prepared_calls.push(prepare_tool_call(sink, runtime_state, request, call).await);
         }
@@ -503,6 +579,7 @@ pub async fn execute_tool_calls(
         let batch_results = if parallel_batch && prepared_calls.len() > 1 {
             join_all(prepared_calls.into_iter().map(|prepared| {
                 execute_prepared_tool_call(
+                    runtime_state,
                     request,
                     &resolved_profile,
                     prepared,
@@ -516,6 +593,7 @@ pub async fn execute_tool_calls(
             for prepared in prepared_calls {
                 results.push(
                     execute_prepared_tool_call(
+                        runtime_state,
                         request,
                         &resolved_profile,
                         prepared,
@@ -541,6 +619,17 @@ pub async fn execute_tool_calls(
                 suspended = true;
                 break;
             }
+        }
+
+        if let Some(batch_span_id) = batch_span_id {
+            let status = if suspended {
+                CallSpanStatus::Interrupted
+            } else {
+                CallSpanStatus::Ok
+            };
+            let _ = runtime_state
+                .trace_close_span(&request.tab_id, &batch_span_id, status, None)
+                .await;
         }
 
         if suspended {
