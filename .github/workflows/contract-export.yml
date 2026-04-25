@@ -1,0 +1,34 @@
+name: local-agent-contract-export
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  export-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build fixture
+        run: |
+          mkdir -p tests/fixtures
+          cargo run -- --prompt "ping" --output jsonl > tests/fixtures/ping.generated.jsonl
+
+      - name: Validate fixture envelope
+        run: |
+          test -s tests/fixtures/ping.generated.jsonl
+          head -n 1 tests/fixtures/ping.generated.jsonl | jq -e '.payload.type == "status"' >/dev/null
+          tail -n 1 tests/fixtures/ping.generated.jsonl | jq -e '.payload.type == "complete"' >/dev/null
+
+      - name: Validate committed fixture
+        run: |
+          test -s tests/fixtures/ping.jsonl
+          head -n 1 tests/fixtures/ping.jsonl | jq -e '.payload.type == "status"' >/dev/null
+          tail -n 1 tests/fixtures/ping.jsonl | jq -e '.payload.type == "complete"' >/dev/null

@@ -1,0 +1,2 @@
+{"tabId":"cli-tab","payload":{"type":"status","stage":"completed","message":"single turn completed for prompt"}}
+{"payload":{"outcome":"completed","type":"complete"},"protocolVersion":1,"tabId":"cli-tab"}

@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use crate::commands::{Args, Command, ConfigSubcommand};
+use crate::commands::{parse_output_mode, Args, Command, ConfigSubcommand, OutputMode};
 
 pub fn run() {
     let args = Args::parse();
@@ -9,7 +9,35 @@ pub fn run() {
     match args.run_mode() {
         crate::commands::RunMode::Command => run_command(&args),
         crate::commands::RunMode::SingleTurn => {
-            crate::output::print_single_turn_hint(&state, args.prompt.as_deref());
+            let output_mode = args
+                .output
+                .as_deref()
+                .and_then(|raw| parse_output_mode(raw).ok())
+                .unwrap_or(OutputMode::Human);
+            match output_mode {
+                OutputMode::Human => {
+                    crate::output::print_single_turn_hint(&state, args.prompt.as_deref());
+                }
+                OutputMode::Jsonl => {
+                    let prompt = args.prompt.as_deref().unwrap_or_default();
+                    println!(
+                        "{}",
+                        crate::output::jsonl::encode_status(
+                            &args.tab_id,
+                            "completed",
+                            if prompt.trim().is_empty() {
+                                "single turn completed"
+                            } else {
+                                "single turn completed for prompt"
+                            },
+                        )
+                    );
+                    println!(
+                        "{}",
+                        crate::output::jsonl::encode_complete(&args.tab_id, "completed")
+                    );
+                }
+            }
         }
         crate::commands::RunMode::Repl => {
             crate::output::print_repl_banner(&state);
