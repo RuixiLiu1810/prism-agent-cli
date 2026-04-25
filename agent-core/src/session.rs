@@ -607,6 +607,20 @@ impl AgentRuntimeState {
         let _ = self.persist_tool_approvals().await;
     }
 
+    pub async fn tool_approvals_for_tab(
+        &self,
+        tab_id: &str,
+    ) -> HashMap<String, ToolApprovalRecord> {
+        let mut approvals = self.tool_approvals.lock().await;
+        let cleaned = cleanup_expired_tool_approvals(&mut approvals);
+        let snapshot = approvals.get(tab_id).cloned().unwrap_or_default();
+        drop(approvals);
+        if cleaned {
+            let _ = self.persist_tool_approvals().await;
+        }
+        snapshot
+    }
+
     pub async fn check_tool_approval(&self, tab_id: &str, tool_name: &str) -> ToolApprovalState {
         let mut approvals = self.tool_approvals.lock().await;
         let tab_entry = approvals.entry(tab_id.to_string()).or_default();
@@ -983,6 +997,17 @@ impl AgentRuntimeState {
         let pending = pending_turns.remove(tab_id);
         drop(pending_turns);
         let _ = self.persist_pending_turns().await;
+        pending
+    }
+
+    pub async fn pending_turn_for(&self, tab_id: &str) -> Option<PendingTurnResume> {
+        let mut pending_turns = self.pending_turns.lock().await;
+        let cleaned = cleanup_expired_pending_turns(&mut pending_turns);
+        let pending = pending_turns.get(tab_id).cloned();
+        drop(pending_turns);
+        if cleaned {
+            let _ = self.persist_pending_turns().await;
+        }
         pending
     }
 
@@ -1989,6 +2014,52 @@ mod tests {
         assert_eq!(pending.local_session_id.as_deref(), Some("session-a"));
         assert_eq!(pending.target_label.as_deref(), Some("main.tex"));
         assert!(state.take_pending_turn("tab-a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_turn_snapshot_does_not_consume_state() {
+        let state = AgentRuntimeState::default();
+        state
+            .store_pending_turn(PendingTurnResume {
+                project_path: "/tmp/project-a".to_string(),
+                tab_id: "tab-a".to_string(),
+                local_session_id: Some("session-a".to_string()),
+                model: Some("MiniMax-M2.7".to_string()),
+                turn_profile: None,
+                approval_tool_name: "run_shell_command".to_string(),
+                target_label: Some("README.md".to_string()),
+                continuation_prompt: "Resume.".to_string(),
+                created_at: String::new(),
+                expires_at: String::new(),
+            })
+            .await;
+
+        let snapshot = state.pending_turn_for("tab-a").await;
+        assert!(snapshot.is_some());
+        let taken = state.take_pending_turn("tab-a").await;
+        assert!(taken.is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_approvals_snapshot_does_not_consume_allow_once() {
+        let state = AgentRuntimeState::default();
+        state
+            .set_tool_approval("tab-a", "run_shell_command", "allow_once")
+            .await
+            .expect("set allow_once");
+
+        let approvals = state.tool_approvals_for_tab("tab-a").await;
+        assert_eq!(
+            approvals
+                .get("run_shell_command")
+                .map(|record| record.remaining_uses),
+            Some(1)
+        );
+
+        let check = state
+            .check_tool_approval("tab-a", "run_shell_command")
+            .await;
+        assert_eq!(check.allow_once_remaining, 1);
     }
 
     #[tokio::test]
