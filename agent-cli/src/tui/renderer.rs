@@ -96,7 +96,8 @@ mod tests {
         vm.focus = UiFocus::Timeline;
         vm.selected_line = 0;
         vm.toggle_detail();
-        let snapshot = CliStatusSnapshot::collect("minimax", "MiniMax-M1", ".", "session-1", "human");
+        let snapshot =
+            CliStatusSnapshot::collect("minimax", "MiniMax-M1", ".", "session-1", "human");
         let lines = render_frame(&snapshot, &vm, 120, 30);
         assert!(lines.iter().any(|l| l.contains("tool=read_file")));
     }

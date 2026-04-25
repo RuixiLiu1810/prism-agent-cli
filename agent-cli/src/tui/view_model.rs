@@ -90,7 +90,9 @@ mod tests {
     fn appends_user_assistant_semantic_lines() {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.push_user_prompt("read one file".to_string());
-        vm.apply_update(ViewUpdate::AssistantDelta("I will inspect now.".to_string()));
+        vm.apply_update(ViewUpdate::AssistantDelta(
+            "I will inspect now.".to_string(),
+        ));
         vm.apply_update(ViewUpdate::AssistantDelta(" by listing files.".to_string()));
         vm.apply_update(ViewUpdate::Semantic {
             text: "Read 1 file".to_string(),
@@ -109,7 +111,7 @@ mod tests {
         let mut vm = TuiViewModel::new("session-1".to_string());
         vm.apply_update(ViewUpdate::Semantic {
             text: "Waiting for approval".to_string(),
-            details: vec!["run /approve shell once".to_string()],
+            details: vec!["run /permissions shell once".to_string()],
         });
         vm.focus = UiFocus::Timeline;
         vm.selected_line = 0;

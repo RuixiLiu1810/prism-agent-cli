@@ -101,9 +101,6 @@ mod tests {
             history.start_reverse_search("read").as_deref(),
             Some("read src/main.rs")
         );
-        assert_eq!(
-            history.search_prev().as_deref(),
-            Some("read Cargo.toml")
-        );
+        assert_eq!(history.search_prev().as_deref(), Some("read Cargo.toml"));
     }
 }

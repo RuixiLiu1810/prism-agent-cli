@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use agent_core::{AgentRuntimeState, AgentToolCall, AgentToolResult};
+use agent_core::{AgentRuntimeState, AgentToolCall, AgentToolResult, StaticConfigProvider};
 use tokio::sync::watch;
 
 use crate::local_tools;
 
 pub async fn execute_cli_tool(
     runtime_state: Arc<AgentRuntimeState>,
+    config_provider: Arc<StaticConfigProvider>,
     tab_id: String,
     project_root: String,
     call: AgentToolCall,
@@ -14,6 +15,7 @@ pub async fn execute_cli_tool(
 ) -> AgentToolResult {
     local_tools::execute_tool_call(
         runtime_state.as_ref(),
+        config_provider.as_ref(),
         &tab_id,
         &project_root,
         call,
@@ -25,11 +27,18 @@ pub async fn execute_cli_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::AgentRuntimeConfig;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn unsupported_executor_returns_error_result() {
+        let config_provider = Arc::new(StaticConfigProvider {
+            config: AgentRuntimeConfig::default_local_agent(),
+            config_dir: PathBuf::from("/tmp"),
+        });
         let result = execute_cli_tool(
             Arc::new(AgentRuntimeState::default()),
+            config_provider,
             "tab-1".to_string(),
             ".".to_string(),
             AgentToolCall {

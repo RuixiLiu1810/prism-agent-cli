@@ -50,7 +50,11 @@ impl InputBuffer {
         let prompt = self.current.trim().to_string();
         self.current.clear();
         self.undo_stack.clear();
-        if prompt.is_empty() { None } else { Some(prompt) }
+        if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt)
+        }
     }
 
     pub fn undo(&mut self) -> bool {

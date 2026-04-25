@@ -1,6 +1,4 @@
-use agent_core::{
-    AgentCompletePayload, AgentEventEnvelope, AgentEventPayload, EventSink,
-};
+use agent_core::{AgentCompletePayload, AgentEventEnvelope, AgentEventPayload, EventSink};
 
 use super::types::ViewUpdate;
 
@@ -26,7 +24,9 @@ impl EventSink for ChannelEventSink {
     }
 
     fn emit_complete(&self, payload: &AgentCompletePayload) {
-        let _ = self.tx.send(TuiRuntimeEvent::AgentComplete(payload.clone()));
+        let _ = self
+            .tx
+            .send(TuiRuntimeEvent::AgentComplete(payload.clone()));
     }
 }
 
@@ -48,7 +48,7 @@ pub fn map_payload(payload: &AgentEventPayload) -> Option<ViewUpdate> {
                 .unwrap_or(false)
             {
                 Some(ViewUpdate::WaitingApproval(
-                    "run /approve shell once or /approve shell session".to_string(),
+                    "run /permissions shell once or /permissions shell session".to_string(),
                 ))
             } else {
                 Some(ViewUpdate::Semantic {
@@ -165,7 +165,9 @@ mod tests {
             outcome: "completed".to_string(),
         });
 
-        let first = rx.try_recv().unwrap_or_else(|e| panic!("missing first event: {e}"));
+        let first = rx
+            .try_recv()
+            .unwrap_or_else(|e| panic!("missing first event: {e}"));
         let second = rx
             .try_recv()
             .unwrap_or_else(|e| panic!("missing complete event: {e}"));

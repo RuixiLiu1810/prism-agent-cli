@@ -22,11 +22,7 @@ pub fn classify_input(line: &str) -> ReplAction {
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-pub async fn run_repl<R, W, H>(
-    mut reader: R,
-    writer: &mut W,
-    on_submit: H,
-) -> Result<(), String>
+pub async fn run_repl<R, W, H>(mut reader: R, writer: &mut W, on_submit: H) -> Result<(), String>
 where
     R: BufRead,
     W: Write,

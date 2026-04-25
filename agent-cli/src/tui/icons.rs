@@ -10,7 +10,11 @@ pub struct Icons {
 
 impl Icons {
     pub fn project_logo() -> &'static str {
-        "▗▄▖▗▄▖\n▐▌▚▞▐▌\n▐▌▞▚▐▌\n▝▚▞▝▚▞"
+        concat!(
+        "\x1b[38;2;180;82;48m▐▙\x1b[0m    \x1b[38;2;180;82;48m▟▌\x1b[0m\n",
+        "\x1b[38;2;202;96;54m▐\x1b[48;2;45;28;22m\x1b[38;2;176;96;70m▛\x1b[38;2;232;132;74m████\x1b[48;2;45;28;22m\x1b[38;2;176;96;70m▜\x1b[0m\x1b[38;2;176;96;70m▌\x1b[0m\n",
+        "\x1b[38;2;190;86;52m▐\x1b[38;2;220;116;68m██████\x1b[38;2;190;86;52m▌\x1b[0m",
+    )
     }
 
     pub fn detect() -> Self {
@@ -62,19 +66,21 @@ fn prefers_ascii() -> bool {
     {
         return true;
     }
-    let lang = std::env::var("LANG").unwrap_or_default().to_ascii_uppercase();
+    let lang = std::env::var("LANG")
+        .unwrap_or_default()
+        .to_ascii_uppercase();
     !lang.contains("UTF-8")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Icons, reduced_motion_enabled};
+    use super::{reduced_motion_enabled, Icons};
 
     #[test]
     fn project_logo_is_unicode_pixel_block() {
         let logo = Icons::project_logo();
-        assert_eq!(logo.lines().count(), 4);
-        assert!(logo.contains("▗"));
+        assert_eq!(logo.lines().count(), 3);
+        assert!(logo.contains("▛"));
     }
 
     #[test]

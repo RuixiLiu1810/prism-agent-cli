@@ -6,13 +6,14 @@ use std::sync::{Arc, Mutex};
 use agent_core::{
     emit_agent_complete, emit_error, AgentCompletePayload, AgentErrorEvent, AgentEventEnvelope,
     AgentEventPayload, AgentResponseMode, AgentRuntimeConfig, AgentRuntimeState, AgentTaskKind,
-    AgentToolResultEvent, AgentTurnDescriptor, AgentTurnProfile, EventSink,
-    StaticConfigProvider, ToolExecutorFn,
+    AgentToolResultEvent, AgentTurnDescriptor, AgentTurnProfile, EventSink, StaticConfigProvider,
+    ToolExecutorFn,
 };
 
 use crate::args::{Args, ToolMode};
 use crate::command_router::{self, ReplCommand};
 use crate::config_model::ResolvedConfig;
+use crate::permissions;
 use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
 use crate::tui::icons::{reduced_motion_enabled, Icons};
@@ -87,7 +88,9 @@ impl StreamingTuiEventSink {
             fixed_input_bar: false,
             session_status: Mutex::new(UiSessionStatus::Idle),
             icons: Icons::detect(),
-            theme: Theme { enable_color: false },
+            theme: Theme {
+                enable_color: false,
+            },
             reduced_motion: true,
             spinner_tick: AtomicUsize::new(0),
             assistant_prefix_printed: Mutex::new(false),
@@ -142,7 +145,9 @@ impl StreamingTuiEventSink {
     }
 
     fn draw_fixed_input_bar(&self) {
-        if let Some((width, scroll_bottom, top_row, input_row, bottom_row)) = self.fixed_bar_layout() {
+        if let Some((width, scroll_bottom, top_row, input_row, bottom_row)) =
+            self.fixed_bar_layout()
+        {
             let border = self.theme.paint(Role::Subtle, "─".repeat(width));
             self.write_human(&format!(
                 "\x1b[1;{scroll_bottom}r\x1b[{top_row};1H\x1b[2K{border}\x1b[{input_row};1H\x1b[2K› \x1b[{bottom_row};1H\x1b[2K{border}\x1b[{input_row};3H"
@@ -215,7 +220,8 @@ impl StreamingTuiEventSink {
 
     fn render_user_prompt(&self, prompt: &str) {
         self.flush_assistant_stream_boundary();
-        for row in render_user_command_rows(&self.theme, prompt, Self::terminal_width_or_default()) {
+        for row in render_user_command_rows(&self.theme, prompt, Self::terminal_width_or_default())
+        {
             self.write_human(&(row + "\n"));
         }
         // Keep a clear rhythm between user command rows and assistant response rows.
@@ -233,7 +239,9 @@ impl StreamingTuiEventSink {
 
     fn prepare_transcript_output(&self) {
         if let Some((_, scroll_bottom, _, input_row, _)) = self.fixed_bar_layout() {
-            self.write_human(&format!("\x1b[{input_row};1H\x1b[2K\x1b[{scroll_bottom};1H"));
+            self.write_human(&format!(
+                "\x1b[{input_row};1H\x1b[2K\x1b[{scroll_bottom};1H"
+            ));
         } else if self.mirror_stdout && io::stdout().is_terminal() {
             // Fallback for non-fixed-bar terminals: clear prompt echo line.
             self.write_human("\x1b[1A\r\x1b[2K");
@@ -312,7 +320,7 @@ impl StreamingTuiEventSink {
                     self.theme.paint(
                         Role::Subtle,
                         format!(
-                            "{} run /approve shell once or /approve shell session",
+                            "{} run /permissions shell once or /permissions shell session",
                             self.icons.detail
                         ),
                     ),
@@ -479,13 +487,13 @@ fn static_provider_for(resolved: &ResolvedConfig) -> StaticConfigProvider {
 
 fn render_help_panel() {
     println!(
-        "TUI (streaming) commands:\n  /help\n  /commands\n  /status\n  /approve shell once|session|deny\n  exit|quit"
+        "TUI (streaming) commands:\n  /help\n  /commands\n  /status\n  /permissions [show|clear|shell once|shell session|shell deny]\n  /approve shell once|session|deny (alias)\n  exit|quit"
     );
 }
 
 fn render_commands_panel() {
     println!(
-        "Supported commands:\n  /help\n  /commands\n  /status\n  /approve shell once|session|deny"
+        "Supported commands:\n  /help\n  /commands\n  /status\n  /permissions\n  /permissions shell once|session|deny\n  /approve shell once|session|deny (alias)"
     );
 }
 
@@ -559,15 +567,24 @@ pub async fn run_tui_shell(
     }
 
     let tool_runtime_state = Arc::clone(&runtime_state);
+    let tool_config_provider = Arc::new(static_provider_for(&resolved));
     let tool_tab_id = args.tab_id.clone();
     let tool_project_path = args.project_path.clone();
     let tool_executor: ToolExecutorFn = Arc::new(move |call, cancel_rx| {
         let runtime_state = Arc::clone(&tool_runtime_state);
+        let config_provider = Arc::clone(&tool_config_provider);
         let tab_id = tool_tab_id.clone();
         let project_root = tool_project_path.clone();
         Box::pin(async move {
-            tool_executor::execute_cli_tool(runtime_state, tab_id, project_root, call, cancel_rx)
-                .await
+            tool_executor::execute_cli_tool(
+                runtime_state,
+                config_provider,
+                tab_id,
+                project_root,
+                call,
+                cancel_rx,
+            )
+            .await
         })
     });
 
@@ -612,57 +629,53 @@ pub async fn run_tui_shell(
                 render_status_inline(&snapshot);
                 return Box::pin(async { Ok(()) });
             }
-            ReplCommand::ApproveShellOnce => {
+            ReplCommand::Permissions(command) => {
                 repl_streaming_sink_for_submit.prepare_transcript_output();
                 let runtime_state = Arc::clone(&repl_runtime_state);
                 let tab_id = repl_args.tab_id.clone();
                 let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
+                let sink = Arc::clone(&repl_sink);
+                let tool_executor = Arc::clone(&repl_tool_executor);
+                let resolved_for_resume = repl_resolved.clone();
+                let local_session_id_for_resume = local_session_id.clone();
                 return Box::pin(async move {
-                    match runtime_state
-                        .set_tool_approval(&tab_id, "run_shell_command", "allow_once")
-                        .await
-                    {
-                        Ok(()) => {
-                            streaming_sink.set_status(UiSessionStatus::Idle);
-                            println!("Approved shell for one command in this session.");
-                        }
-                        Err(err) => eprintln!("agent-runtime error: {}", err),
-                    }
-                    Ok(())
-                });
-            }
-            ReplCommand::ApproveShellSession => {
-                repl_streaming_sink_for_submit.prepare_transcript_output();
-                let runtime_state = Arc::clone(&repl_runtime_state);
-                let tab_id = repl_args.tab_id.clone();
-                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
-                return Box::pin(async move {
-                    match runtime_state
-                        .set_tool_approval(&tab_id, "run_shell_command", "allow_session")
-                        .await
-                    {
-                        Ok(()) => {
-                            streaming_sink.set_status(UiSessionStatus::Idle);
-                            println!("Approved shell for this session.");
-                        }
-                        Err(err) => eprintln!("agent-runtime error: {}", err),
-                    }
-                    Ok(())
-                });
-            }
-            ReplCommand::ApproveShellDeny => {
-                repl_streaming_sink_for_submit.prepare_transcript_output();
-                let runtime_state = Arc::clone(&repl_runtime_state);
-                let tab_id = repl_args.tab_id.clone();
-                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
-                return Box::pin(async move {
-                    match runtime_state
-                        .set_tool_approval(&tab_id, "run_shell_command", "deny_session")
-                        .await
-                    {
-                        Ok(()) => {
-                            streaming_sink.set_status(UiSessionStatus::Idle);
-                            println!("Denied shell for this session.");
+                    match permissions::execute_permission_command(runtime_state.as_ref(), &tab_id, command).await {
+                        Ok(action) => {
+                            println!("{}", action.message);
+                            if let Some(pending) = action.pending_turn {
+                                let config_provider = static_provider_for(&resolved_for_resume);
+                                match turn_runner::resume_pending_turn(
+                                    sink.as_ref(),
+                                    &config_provider,
+                                    runtime_state.as_ref(),
+                                    pending,
+                                    &resolved_for_resume.model,
+                                    &local_session_id_for_resume,
+                                    tool_executor,
+                                )
+                                .await
+                                {
+                                    Ok(outcome) => {
+                                        let outcome_str = if outcome.suspended {
+                                            "suspended"
+                                        } else {
+                                            "completed"
+                                        };
+                                        emit_agent_complete(sink.as_ref(), &tab_id, outcome_str);
+                                    }
+                                    Err(err) => {
+                                        emit_error(
+                                            sink.as_ref(),
+                                            &tab_id,
+                                            "turn_resume_failed",
+                                            err,
+                                        );
+                                        emit_agent_complete(sink.as_ref(), &tab_id, "error");
+                                    }
+                                }
+                            } else {
+                                streaming_sink.set_status(UiSessionStatus::Idle);
+                            }
                         }
                         Err(err) => eprintln!("agent-runtime error: {}", err),
                     }
@@ -811,7 +824,7 @@ mod tests {
         });
         let out = sink.take_test_output();
         assert!(out.contains("run_shell_command requires approval"));
-        assert!(out.contains("/approve shell once"));
+        assert!(out.contains("/permissions shell once"));
     }
 
     #[test]

@@ -118,11 +118,10 @@ pub(crate) async fn execute_run_shell_command(
         .await;
 
     if approval.deny_session {
-        return approval_required_result(
+        return error_result(
             "run_shell_command",
             call_id,
-            "run_shell_command is denied for this chat session.".to_string(),
-            args,
+            "run_shell_command is denied for this chat session. Use /permissions shell session or /permissions clear to update policy.".to_string(),
         );
     }
 
@@ -269,6 +268,31 @@ mod tests {
 
         assert!(!result.is_error, "result={:?}", result);
         assert_eq!(result.content["exitCode"], 0);
+    }
+
+    #[tokio::test]
+    async fn deny_session_returns_terminal_error_without_reapproval_prompt() {
+        let runtime = AgentRuntimeState::default();
+        runtime
+            .set_tool_approval("tab-1", "run_shell_command", "deny_session")
+            .await
+            .unwrap_or_else(|e| panic!("set approval: {e}"));
+
+        let result = execute_run_shell_command(
+            &runtime,
+            "tab-1",
+            ".",
+            "call-1",
+            serde_json::json!({"command":"echo ok"}),
+            None,
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(result
+            .preview
+            .contains("run_shell_command is denied for this chat session"));
+        assert!(result.content.get("approvalRequired").is_none());
     }
 
     #[tokio::test]

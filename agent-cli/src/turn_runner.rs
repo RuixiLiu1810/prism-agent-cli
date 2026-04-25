@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    providers, AgentRuntimeState, AgentTurnDescriptor, EventSink, StaticConfigProvider,
-    ToolExecutorFn,
+    emit_turn_resumed, providers, AgentRuntimeState, AgentTurnDescriptor, EventSink,
+    PendingTurnResume, StaticConfigProvider, ToolExecutorFn,
 };
 
 pub fn is_chat_completions_provider(provider: &str) -> bool {
@@ -56,6 +56,54 @@ pub async fn run_turn(
     }
 
     Ok(outcome)
+}
+
+pub async fn resume_pending_turn(
+    sink: &dyn EventSink,
+    config_provider: &StaticConfigProvider,
+    runtime_state: &AgentRuntimeState,
+    pending: PendingTurnResume,
+    fallback_model: &str,
+    fallback_local_session_id: &str,
+    tool_executor: ToolExecutorFn,
+) -> Result<providers::AgentTurnOutcome, String> {
+    let local_session_id = pending
+        .local_session_id
+        .clone()
+        .unwrap_or_else(|| fallback_local_session_id.to_string());
+    let model = pending
+        .model
+        .clone()
+        .unwrap_or_else(|| fallback_model.to_string());
+
+    emit_turn_resumed(
+        sink,
+        &pending.tab_id,
+        Some(local_session_id.as_str()),
+        &format!(
+            "Approval received for {}. Resuming suspended turn.",
+            pending.approval_tool_name
+        ),
+    );
+
+    let request = AgentTurnDescriptor {
+        project_path: pending.project_path,
+        prompt: pending.continuation_prompt,
+        tab_id: pending.tab_id,
+        model: Some(model),
+        local_session_id: Some(local_session_id),
+        previous_response_id: None,
+        turn_profile: pending.turn_profile,
+    };
+
+    run_turn(
+        sink,
+        config_provider,
+        runtime_state,
+        &request,
+        Arc::clone(&tool_executor),
+    )
+    .await
 }
 
 #[cfg(test)]

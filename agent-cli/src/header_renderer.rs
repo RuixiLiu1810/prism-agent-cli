@@ -6,8 +6,14 @@ use crate::tui::theme::{Role, Theme};
 pub fn render_header(snapshot: &CliStatusSnapshot) -> String {
     let dirty_suffix = if snapshot.git_dirty { "*" } else { "" };
     let theme = Theme::detect();
-    let banner = theme.paint(Role::Accent, "=== agent-runtime ==============================================");
-    let footer = theme.paint(Role::Accent, "===============================================================");
+    let banner = theme.paint(
+        Role::Accent,
+        "=== agent-runtime ==============================================",
+    );
+    let footer = theme.paint(
+        Role::Accent,
+        "===============================================================",
+    );
     let line_one = theme.paint(
         Role::Text,
         format!(
@@ -23,10 +29,7 @@ pub fn render_header(snapshot: &CliStatusSnapshot) -> String {
         ),
     );
 
-    format!(
-        "\n{}\n{}\n{}\n{}\n",
-        banner, line_one, line_two, footer
-    )
+    format!("\n{}\n{}\n{}\n{}\n", banner, line_one, line_two, footer)
 }
 
 pub fn print_header<W: Write>(writer: &mut W, snapshot: &CliStatusSnapshot) -> Result<(), String> {

@@ -122,7 +122,7 @@ impl HumanEventSink {
             .unwrap_or(false)
         {
             return format!(
-                "\n[result] {}\n[hint] run /approve shell once or /approve shell session\n",
+                "\n[result] {}\n[hint] run /permissions shell once or /permissions shell session\n",
                 result.preview
             );
         }
@@ -216,6 +216,6 @@ mod tests {
         });
 
         let out = sink.take_test_output();
-        assert!(out.contains("/approve shell once"));
+        assert!(out.contains("/permissions shell once"));
     }
 }

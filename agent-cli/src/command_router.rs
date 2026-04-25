@@ -3,10 +3,20 @@ pub(crate) const KNOWN_COMMANDS: &[&str] = &[
     "/commands",
     "/config",
     "/model",
+    "/permissions",
     "/status",
     "/clear",
     "/approve",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionCommand {
+    Show,
+    ShellOnce,
+    ShellSession,
+    ShellDeny,
+    Clear,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplCommand {
@@ -17,9 +27,7 @@ pub enum ReplCommand {
     Clear,
     ModelShow,
     ModelSet(String),
-    ApproveShellOnce,
-    ApproveShellSession,
-    ApproveShellDeny,
+    Permissions(PermissionCommand),
     Unknown {
         raw: String,
         suggestion: Option<&'static str>,
@@ -50,22 +58,46 @@ pub fn parse_repl_command(input: &str) -> ReplCommand {
                 ReplCommand::ModelSet(model.trim().to_string())
             }
         }
+        "/permissions" => parse_permissions_command(&mut parts, trimmed),
         "/approve" => {
             let target = parts.next().unwrap_or_default();
             let mode = parts.next().unwrap_or_default();
             match (target, mode) {
-                ("shell", "once") => ReplCommand::ApproveShellOnce,
-                ("shell", "session") => ReplCommand::ApproveShellSession,
-                ("shell", "deny") => ReplCommand::ApproveShellDeny,
+                ("shell", "once") => ReplCommand::Permissions(PermissionCommand::ShellOnce),
+                ("shell", "session") => ReplCommand::Permissions(PermissionCommand::ShellSession),
+                ("shell", "deny") => ReplCommand::Permissions(PermissionCommand::ShellDeny),
                 _ => ReplCommand::Unknown {
                     raw: trimmed.to_string(),
-                    suggestion: Some("/approve shell once"),
+                    suggestion: Some("/permissions shell once"),
                 },
             }
         }
         other => ReplCommand::Unknown {
             raw: other.to_string(),
             suggestion: suggest_command(other),
+        },
+    }
+}
+
+fn parse_permissions_command<'a>(
+    parts: &mut impl Iterator<Item = &'a str>,
+    raw: &str,
+) -> ReplCommand {
+    match parts.next() {
+        None | Some("show") => ReplCommand::Permissions(PermissionCommand::Show),
+        Some("clear") => ReplCommand::Permissions(PermissionCommand::Clear),
+        Some("shell") => match parts.next() {
+            Some("once") => ReplCommand::Permissions(PermissionCommand::ShellOnce),
+            Some("session") => ReplCommand::Permissions(PermissionCommand::ShellSession),
+            Some("deny") => ReplCommand::Permissions(PermissionCommand::ShellDeny),
+            _ => ReplCommand::Unknown {
+                raw: raw.to_string(),
+                suggestion: Some("/permissions shell once"),
+            },
+        },
+        _ => ReplCommand::Unknown {
+            raw: raw.to_string(),
+            suggestion: Some("/permissions"),
         },
     }
 }
@@ -168,7 +200,7 @@ fn levenshtein(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_repl_command, ReplCommand};
+    use super::{parse_repl_command, PermissionCommand, ReplCommand};
 
     #[test]
     fn parses_supported_commands() {
@@ -192,15 +224,35 @@ mod tests {
     fn parses_approve_shell_commands() {
         assert_eq!(
             parse_repl_command("/approve shell once"),
-            ReplCommand::ApproveShellOnce
+            ReplCommand::Permissions(PermissionCommand::ShellOnce)
         );
         assert_eq!(
             parse_repl_command("/approve shell session"),
-            ReplCommand::ApproveShellSession
+            ReplCommand::Permissions(PermissionCommand::ShellSession)
         );
         assert_eq!(
             parse_repl_command("/approve shell deny"),
-            ReplCommand::ApproveShellDeny
+            ReplCommand::Permissions(PermissionCommand::ShellDeny)
+        );
+    }
+
+    #[test]
+    fn parses_permissions_commands() {
+        assert_eq!(
+            parse_repl_command("/permissions"),
+            ReplCommand::Permissions(PermissionCommand::Show)
+        );
+        assert_eq!(
+            parse_repl_command("/permissions show"),
+            ReplCommand::Permissions(PermissionCommand::Show)
+        );
+        assert_eq!(
+            parse_repl_command("/permissions clear"),
+            ReplCommand::Permissions(PermissionCommand::Clear)
+        );
+        assert_eq!(
+            parse_repl_command("/permissions shell session"),
+            ReplCommand::Permissions(PermissionCommand::ShellSession)
         );
     }
 

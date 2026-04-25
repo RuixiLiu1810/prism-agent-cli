@@ -8,6 +8,7 @@ mod config_wizard;
 mod header_renderer;
 mod local_tools;
 mod output;
+mod permissions;
 mod repl;
 mod status_snapshot;
 mod tool_executor;
@@ -139,7 +140,10 @@ fn render_help_panel() {
   /config    Edit local config interactively
   /model     Show current model
   /model X   Persist model X to local config file
-  /approve shell once|session|deny  Control shell tool approval
+  /permissions [show|clear|shell once|shell session|shell deny]
+            Manage runtime tool approval policy
+  /approve shell once|session|deny
+            Compatibility alias for /permissions shell ...
   /status    Show current runtime status
   /clear     Clear the screen and redraw header
   exit|quit  Leave REPL"
@@ -154,7 +158,9 @@ fn render_commands_panel() {
   /config
   /model
   /model <model-name>
-  /approve shell once|session|deny
+  /permissions
+  /permissions shell once|session|deny
+  /approve shell once|session|deny (alias)
   /status
   /clear"
     );
@@ -378,7 +384,11 @@ mod tests {
 
     #[test]
     fn chooses_tui_for_repl_human_tui_mode() {
-        assert!(should_use_tui(RunMode::Repl, OutputMode::Human, UiMode::Tui));
+        assert!(should_use_tui(
+            RunMode::Repl,
+            OutputMode::Human,
+            UiMode::Tui
+        ));
     }
 
     #[test]
@@ -470,15 +480,24 @@ async fn main() -> ExitCode {
     };
 
     let tool_runtime_state = Arc::clone(&runtime_state);
+    let tool_config_provider = Arc::new(static_provider_for(&resolved));
     let tool_tab_id = args.tab_id.clone();
     let tool_project_path = args.project_path.clone();
     let tool_executor: ToolExecutorFn = Arc::new(move |call, cancel_rx| {
         let runtime_state = Arc::clone(&tool_runtime_state);
+        let config_provider = Arc::clone(&tool_config_provider);
         let tab_id = tool_tab_id.clone();
         let project_root = tool_project_path.clone();
         Box::pin(async move {
-            tool_executor::execute_cli_tool(runtime_state, tab_id, project_root, call, cancel_rx)
-                .await
+            tool_executor::execute_cli_tool(
+                runtime_state,
+                config_provider,
+                tab_id,
+                project_root,
+                call,
+                cancel_rx,
+            )
+            .await
         })
     });
 
@@ -641,45 +660,80 @@ async fn main() -> ExitCode {
                         }
                         return Box::pin(async { Ok(()) });
                     }
-                    command_router::ReplCommand::ApproveShellOnce => {
+                    command_router::ReplCommand::Permissions(command) => {
                         let runtime_state = Arc::clone(&repl_runtime_state);
                         let tab_id = repl_args.tab_id.clone();
+                        let sink = Arc::clone(&repl_sink);
+                        let tool_executor = Arc::clone(&repl_tool_executor);
+                        let args_for_command = repl_args.clone();
+                        let session_id_for_command = repl_session_id.clone();
                         return Box::pin(async move {
-                            match runtime_state
-                                .set_tool_approval(&tab_id, "run_shell_command", "allow_once")
-                                .await
+                            match permissions::execute_permission_command(
+                                runtime_state.as_ref(),
+                                &tab_id,
+                                command,
+                            )
+                            .await
                             {
-                                Ok(()) => {
-                                    println!("Approved shell for one command in this session.")
+                                Ok(action) => {
+                                    println!("{}", action.message);
+                                    if let Some(pending) = action.pending_turn {
+                                        let resolved = match resolve_effective_config(
+                                            &args_for_command,
+                                            false,
+                                        ) {
+                                            Ok(cfg) => cfg,
+                                            Err(err) => {
+                                                emit_cli_failure(
+                                                    sink.as_ref(),
+                                                    &tab_id,
+                                                    "config_resolve_failed",
+                                                    &err,
+                                                );
+                                                eprintln!("agent-runtime error: {}", err);
+                                                return Ok(());
+                                            }
+                                        };
+                                        let config_provider = static_provider_for(&resolved);
+                                        match turn_runner::resume_pending_turn(
+                                            sink.as_ref(),
+                                            &config_provider,
+                                            runtime_state.as_ref(),
+                                            pending,
+                                            &resolved.model,
+                                            &session_id_for_command,
+                                            tool_executor,
+                                        )
+                                        .await
+                                        {
+                                            Ok(outcome) => {
+                                                emit_agent_complete(
+                                                    sink.as_ref(),
+                                                    &tab_id,
+                                                    completion_outcome(outcome.suspended),
+                                                );
+                                                if should_refresh_header_after_turn(outcome.suspended)
+                                                {
+                                                    let _ = render_header(
+                                                        repl_output_mode,
+                                                        &args_for_command,
+                                                        &resolved,
+                                                        &session_id_for_command,
+                                                    );
+                                                }
+                                            }
+                                            Err(err) => {
+                                                emit_cli_failure(
+                                                    sink.as_ref(),
+                                                    &tab_id,
+                                                    "turn_resume_failed",
+                                                    &err,
+                                                );
+                                                eprintln!("agent-runtime error: {}", err);
+                                            }
+                                        }
+                                    }
                                 }
-                                Err(err) => eprintln!("agent-runtime error: {}", err),
-                            }
-                            Ok(())
-                        });
-                    }
-                    command_router::ReplCommand::ApproveShellSession => {
-                        let runtime_state = Arc::clone(&repl_runtime_state);
-                        let tab_id = repl_args.tab_id.clone();
-                        return Box::pin(async move {
-                            match runtime_state
-                                .set_tool_approval(&tab_id, "run_shell_command", "allow_session")
-                                .await
-                            {
-                                Ok(()) => println!("Approved shell for this session."),
-                                Err(err) => eprintln!("agent-runtime error: {}", err),
-                            }
-                            Ok(())
-                        });
-                    }
-                    command_router::ReplCommand::ApproveShellDeny => {
-                        let runtime_state = Arc::clone(&repl_runtime_state);
-                        let tab_id = repl_args.tab_id.clone();
-                        return Box::pin(async move {
-                            match runtime_state
-                                .set_tool_approval(&tab_id, "run_shell_command", "deny_session")
-                                .await
-                            {
-                                Ok(()) => println!("Denied shell for this session."),
                                 Err(err) => eprintln!("agent-runtime error: {}", err),
                             }
                             Ok(())
