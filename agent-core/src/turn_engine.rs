@@ -17,7 +17,8 @@ use crate::telemetry::{record_tool_execution, ToolExecutionTimer};
 use crate::tools::{
     check_tool_call_policy, is_document_tool_name, is_parallel_safe_tool, is_reviewable_edit_tool,
     summarize_tool_target, tool_result_display_value, tool_result_requires_approval,
-    tool_result_review_ready, AgentToolCall, AgentToolResult, ToolExecutionPolicyContext,
+    tool_result_review_ready, AgentToolCall, AgentToolContract, AgentToolResult,
+    ToolExecutionPolicyContext,
 };
 
 // ─── Data Types ─────────────────────────────────────────────────────
@@ -41,6 +42,86 @@ pub type ToolExecutorFn = Arc<
         + Send
         + Sync,
 >;
+
+pub trait ToolHandler: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn contract(&self) -> AgentToolContract;
+    fn execute(
+        &self,
+        call: AgentToolCall,
+        cancel_rx: Option<watch::Receiver<bool>>,
+    ) -> Pin<Box<dyn Future<Output = AgentToolResult> + Send>>;
+}
+
+#[derive(Default)]
+pub struct ToolRegistry {
+    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+}
+
+pub struct ToolRegistryBuilder {
+    handlers: HashMap<String, Arc<dyn ToolHandler>>,
+}
+
+impl ToolRegistry {
+    pub fn builder() -> ToolRegistryBuilder {
+        ToolRegistryBuilder {
+            handlers: HashMap::new(),
+        }
+    }
+
+    pub fn handler(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
+        self.handlers.get(name).cloned()
+    }
+
+    pub fn contract_for(&self, name: &str) -> Option<AgentToolContract> {
+        self.handler(name).map(|handler| handler.contract())
+    }
+}
+
+impl ToolRegistryBuilder {
+    pub fn register<H>(mut self, handler: H) -> Self
+    where
+        H: ToolHandler,
+    {
+        let name = handler.name().to_string();
+        self.handlers.insert(name, Arc::new(handler));
+        self
+    }
+
+    pub fn register_arc(mut self, handler: Arc<dyn ToolHandler>) -> Self {
+        let name = handler.name().to_string();
+        self.handlers.insert(name, handler);
+        self
+    }
+
+    pub fn build(self) -> ToolRegistry {
+        ToolRegistry {
+            handlers: self.handlers,
+        }
+    }
+}
+
+pub trait IntoExecutor {
+    fn into_executor(self) -> ToolExecutorFn;
+}
+
+impl IntoExecutor for Arc<ToolRegistry> {
+    fn into_executor(self) -> ToolExecutorFn {
+        Arc::new(move |call, cancel_rx| {
+            let registry = Arc::clone(&self);
+            Box::pin(async move {
+                if let Some(handler) = registry.handler(&call.tool_name) {
+                    return handler.execute(call, cancel_rx).await;
+                }
+                crate::tools::error_result(
+                    &call.tool_name,
+                    &call.call_id,
+                    format!("No registered tool handler for '{}'.", call.tool_name),
+                )
+            })
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 struct PreparedToolCall {
@@ -627,7 +708,7 @@ fn is_cjk_char(c: char) -> bool {
 
 // ─── History Compaction ─────────────────────────────────────────────
 
-const HISTORY_COMPACT_TOKEN_LIMIT: u32 = 60_000;
+const DEFAULT_HISTORY_COMPACT_TOKEN_LIMIT: u32 = 60_000;
 
 fn estimate_message_tokens(msg: &Value) -> u32 {
     let overhead = 4u32;
@@ -667,9 +748,71 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> u32 {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
+pub fn ensure_tool_result_pairing(messages: &mut Vec<Value>) {
+    fn flush_pending(repaired: &mut Vec<Value>, pending_call_ids: &mut Vec<String>) {
+        for call_id in pending_call_ids.drain(..) {
+            repaired.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": "[Tool output missing: the previous turn was interrupted before this tool call completed. Re-run the tool if the result is still needed.]",
+            }));
+        }
+    }
+
+    if messages.is_empty() {
+        return;
+    }
+
+    let mut repaired = Vec::with_capacity(messages.len());
+    let mut pending_call_ids: Vec<String> = Vec::new();
+
+    for message in messages.iter() {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if role != "tool" && !pending_call_ids.is_empty() {
+            flush_pending(&mut repaired, &mut pending_call_ids);
+        }
+
+        if role == "assistant" {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    let maybe_id = tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| tool_call.get("call_id").and_then(Value::as_str))
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    if let Some(call_id) = maybe_id {
+                        if !pending_call_ids.iter().any(|existing| existing == call_id) {
+                            pending_call_ids.push(call_id.to_string());
+                        }
+                    }
+                }
+            }
+        } else if role == "tool" {
+            if let Some(call_id) = message.get("tool_call_id").and_then(Value::as_str) {
+                if let Some(idx) = pending_call_ids.iter().position(|item| item == call_id) {
+                    pending_call_ids.remove(idx);
+                }
+            }
+        }
+
+        repaired.push(message.clone());
+    }
+
+    if !pending_call_ids.is_empty() {
+        flush_pending(&mut repaired, &mut pending_call_ids);
+    }
+
+    *messages = repaired;
+}
+
 pub fn compact_chat_messages(messages: &mut Vec<Value>) {
+    compact_chat_messages_with_limit(messages, DEFAULT_HISTORY_COMPACT_TOKEN_LIMIT);
+}
+
+pub fn compact_chat_messages_with_limit(messages: &mut Vec<Value>, token_limit: u32) {
     let total_tokens = estimate_messages_tokens(messages);
-    if total_tokens <= HISTORY_COMPACT_TOKEN_LIMIT || messages.len() <= 3 {
+    if total_tokens <= token_limit || messages.len() <= 3 {
         return;
     }
 
@@ -683,7 +826,7 @@ pub fn compact_chat_messages(messages: &mut Vec<Value>) {
 
     let system_tokens = estimate_message_tokens(&messages[0]);
     let summary_reserve = 200u32;
-    let available = HISTORY_COMPACT_TOKEN_LIMIT
+    let available = token_limit
         .saturating_sub(system_tokens)
         .saturating_sub(summary_reserve);
 
@@ -1602,6 +1745,34 @@ mod tests {
     };
     use tokio::sync::watch;
 
+    struct EchoTool;
+
+    impl ToolHandler for EchoTool {
+        fn name(&self) -> &'static str {
+            "echo_tool"
+        }
+
+        fn contract(&self) -> AgentToolContract {
+            crate::tools::tool_contract("read_file")
+        }
+
+        fn execute(
+            &self,
+            call: AgentToolCall,
+            _cancel_rx: Option<watch::Receiver<bool>>,
+        ) -> Pin<Box<dyn Future<Output = AgentToolResult> + Send>> {
+            Box::pin(async move {
+                AgentToolResult {
+                    tool_name: call.tool_name,
+                    call_id: call.call_id,
+                    is_error: false,
+                    preview: "ok".to_string(),
+                    content: json!({"echo": call.arguments}),
+                }
+            })
+        }
+    }
+
     #[test]
     fn estimate_tokens_ascii() {
         // "hello world" = 11 chars, ~3 tokens
@@ -1658,6 +1829,56 @@ mod tests {
     }
 
     #[test]
+    fn ensure_tool_result_pairing_inserts_missing_tool_message_before_next_non_tool() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"}
+                }]
+            }),
+            json!({"role": "user", "content": "continue"}),
+        ];
+
+        ensure_tool_result_pairing(&mut messages);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].get("role").and_then(Value::as_str), Some("tool"));
+        assert_eq!(
+            messages[2].get("tool_call_id").and_then(Value::as_str),
+            Some("call_1")
+        );
+        assert_eq!(messages[3].get("role").and_then(Value::as_str), Some("user"));
+    }
+
+    #[test]
+    fn ensure_tool_result_pairing_is_noop_when_already_paired() {
+        let mut messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"}
+                }]
+            }),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "ok"}),
+            json!({"role": "assistant", "content": "done"}),
+        ];
+        let original = messages.clone();
+
+        ensure_tool_result_pairing(&mut messages);
+
+        assert_eq!(messages, original);
+    }
+
+    #[test]
     fn emit_status_uses_sink() {
         let sink = VecEventSink::new();
         emit_status(&sink, "tab1", "init", "Starting...");
@@ -1680,6 +1901,40 @@ mod tests {
         let completes = sink.completes.lock().unwrap();
         assert_eq!(completes.len(), 1);
         assert_eq!(completes[0].outcome, "success");
+    }
+
+    #[tokio::test]
+    async fn tool_registry_into_executor_dispatches_registered_handler() {
+        let registry = Arc::new(ToolRegistry::builder().register(EchoTool).build());
+        let executor = Arc::clone(&registry).into_executor();
+        let result = executor(
+            AgentToolCall {
+                tool_name: "echo_tool".to_string(),
+                call_id: "call-echo".to_string(),
+                arguments: r#"{"msg":"hello"}"#.to_string(),
+            },
+            None,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert_eq!(result.content["echo"], r#"{"msg":"hello"}"#);
+    }
+
+    #[tokio::test]
+    async fn tool_registry_into_executor_errors_for_unknown_tool() {
+        let registry = Arc::new(ToolRegistry::builder().register(EchoTool).build());
+        let executor = Arc::clone(&registry).into_executor();
+        let result = executor(
+            AgentToolCall {
+                tool_name: "missing_tool".to_string(),
+                call_id: "call-missing".to_string(),
+                arguments: "{}".to_string(),
+            },
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(result.tool_name, "missing_tool");
     }
 
     #[test]

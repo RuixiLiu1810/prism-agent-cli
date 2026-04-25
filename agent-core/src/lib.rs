@@ -17,8 +17,9 @@ pub mod turn_engine;
 pub mod workflows;
 
 pub use config::{
-    AgentDomainConfig, AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig,
-    ConfigProvider, StaticConfigProvider,
+    autocompact_threshold_for_model, context_window_for_model, AgentDomainConfig,
+    AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig, ConfigProvider,
+    StaticConfigProvider, AUTOCOMPACT_BUFFER_TOKENS, MAX_CONSECUTIVE_COMPACT_FAILURES,
 };
 pub use document_artifacts::{
     artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
@@ -65,17 +66,18 @@ pub use tools::{
     ToolSuspendBehavior,
 };
 pub use turn_engine::{
-    compact_chat_messages, emit_agent_complete, emit_approval_requested, emit_error,
+    compact_chat_messages, compact_chat_messages_with_limit, emit_agent_complete,
+    emit_approval_requested, emit_error, ensure_tool_result_pairing,
     emit_review_artifact_ready, emit_status, emit_text_delta, emit_tool_call,
     emit_tool_interrupt_state, emit_tool_result, emit_tool_resumed, emit_turn_resumed,
     emit_workflow_checkpoint_approved, emit_workflow_checkpoint_rejected,
     emit_workflow_checkpoint_requested, estimate_tokens, execute_tool_calls,
     request_has_binary_attachment_context, should_surface_assistant_text,
     tool_result_feedback_for_model, tool_result_has_invalid_arguments_error, tool_result_status,
-    ExecutedToolBatch, ExecutedToolCall, ToolCallTracker, ToolExecutorFn, TurnBudget,
-    AGENT_CANCELLED_MESSAGE,
+    ExecutedToolBatch, ExecutedToolCall, IntoExecutor, ToolCallTracker, ToolExecutorFn,
+    ToolHandler, ToolRegistry, ToolRegistryBuilder, TurnBudget, AGENT_CANCELLED_MESSAGE,
 };
 pub use workflows::{
-    AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
+    run_subagent_turn, AgentWorkflowState, AgentWorkflowType, WorkflowCheckpointDecision,
     WorkflowCheckpointTransition, WorkflowStageRecord,
 };

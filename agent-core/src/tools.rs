@@ -24,6 +24,7 @@ pub enum ToolCapabilityClass {
     SearchWorkspace,
     ExecuteShell,
     MemoryWrite,
+    DelegateSubagent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +256,16 @@ pub fn tool_contract(tool_name: &str) -> AgentToolContract {
             parallel_safe: false,
             approval_bucket: "remember_fact",
         },
+        "spawn_subagent" => AgentToolContract {
+            capability_class: ToolCapabilityClass::DelegateSubagent,
+            resource_scope: ToolResourceScope::Workspace,
+            approval_policy: ToolApprovalPolicy::Never,
+            review_policy: ToolReviewPolicy::None,
+            suspend_behavior: ToolSuspendBehavior::None,
+            result_shape: ToolResultShape::CommandOutput,
+            parallel_safe: false,
+            approval_bucket: "spawn_subagent",
+        },
         _ => AgentToolContract {
             capability_class: ToolCapabilityClass::SearchWorkspace,
             resource_scope: ToolResourceScope::Workspace,
@@ -303,6 +314,7 @@ pub fn tool_display_kind(tool_name: &str) -> &'static str {
         }
         ToolCapabilityClass::ExecuteShell => "shell_command",
         ToolCapabilityClass::MemoryWrite => "memory_write",
+        ToolCapabilityClass::DelegateSubagent => "subagent_delegate",
     }
 }
 
@@ -793,6 +805,19 @@ fn build_default_tool_specs(include_writing_tools: bool) -> Vec<AgentToolSpec> {
                     "topic": { "type": "string", "description": "Optional topic tag for grouping related memories." }
                 },
                 "required": ["content"],
+                "additionalProperties": false
+            }),
+        ),
+        make_tool_spec(
+            "spawn_subagent",
+            "Delegate a bounded subtask to a temporary subagent and return its final response.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Clear bounded subtask for the subagent." },
+                    "model": { "type": "string", "description": "Optional model override for the subagent turn." }
+                },
+                "required": ["prompt"],
                 "additionalProperties": false
             }),
         ),

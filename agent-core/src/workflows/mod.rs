@@ -1,3 +1,4 @@
+mod coordinator;
 mod literature_review;
 mod paper_drafting;
 mod peer_review;
@@ -10,6 +11,7 @@ use uuid::Uuid;
 pub use literature_review::LiteratureReviewStage;
 pub use paper_drafting::PaperDraftingStage;
 pub use peer_review::PeerReviewStage;
+pub use coordinator::run_subagent_turn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

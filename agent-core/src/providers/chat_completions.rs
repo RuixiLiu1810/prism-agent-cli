@@ -4,12 +4,14 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-use super::AgentTurnOutcome;
+use super::{retry_delay_from_headers, AgentTurnOutcome};
 use crate::tools::is_document_tool_name;
 use crate::{
-    build_agent_instructions_with_work_state, compact_chat_messages, default_tool_specs,
+    autocompact_threshold_for_model, build_agent_instructions_with_work_state,
+    compact_chat_messages_with_limit, default_tool_specs,
     document_artifact_miss, document_fallback_used, effective_tool_choice_for_provider, emit_error,
-    emit_status, emit_text_delta, execute_tool_calls, extract_text_blocks_only,
+    emit_status, emit_text_delta, ensure_tool_result_pairing, execute_tool_calls,
+    extract_text_blocks_only,
     extract_text_segments, extract_tool_result_blocks, extract_tool_use_blocks,
     hidden_chat_message, max_rounds_for_task, provider_display_name, provider_supports_transport,
     push_reasoning_delta, raw_assistant_message, record_document_question_metrics,
@@ -19,6 +21,7 @@ use crate::{
     visible_assistant_message, visible_text_message, visible_tool_result_message,
     AgentRuntimeConfig, AgentRuntimeState, AgentToolCall, AgentTurnDescriptor, ConfigProvider,
     EventSink, ToolCallTracker, ToolExecutorFn, TurnBudget, AGENT_CANCELLED_MESSAGE,
+    MAX_CONSECUTIVE_COMPACT_FAILURES,
     TOOL_ARGUMENTS_RETRY_HINT,
 };
 
@@ -147,6 +150,50 @@ pub fn transcript_to_chat_messages(
     messages
 }
 
+fn preflight_compact_messages(
+    sink: &dyn EventSink,
+    tab_id: &str,
+    model: &str,
+    messages: &mut Vec<Value>,
+) -> Result<(), String> {
+    let threshold = autocompact_threshold_for_model(model);
+    let mut compact_failures = 0u32;
+
+    loop {
+        let before_tokens = crate::turn_engine::estimate_messages_tokens(messages);
+        if before_tokens <= threshold {
+            return Ok(());
+        }
+
+        emit_status(
+            sink,
+            tab_id,
+            "compacting_context",
+            &format!(
+                "Context {} tokens exceeds threshold {}, compacting history...",
+                before_tokens, threshold
+            ),
+        );
+
+        let before_len = messages.len();
+        compact_chat_messages_with_limit(messages, threshold);
+        let after_tokens = crate::turn_engine::estimate_messages_tokens(messages);
+        let reduced = after_tokens < before_tokens || messages.len() < before_len;
+        if reduced {
+            compact_failures = 0;
+            continue;
+        }
+
+        compact_failures = compact_failures.saturating_add(1);
+        if compact_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES {
+            return Err(format!(
+                "Context is too large ({} tokens) and compaction did not reduce it after {} attempts.",
+                after_tokens, MAX_CONSECUTIVE_COMPACT_FAILURES
+            ));
+        }
+    }
+}
+
 async fn stream_chat_completions_response_once(
     sink: &dyn EventSink,
     config: &AgentRuntimeConfig,
@@ -225,7 +272,9 @@ async fn stream_chat_completions_response_once(
             let status = resp.status();
             let retryable = matches!(status.as_u16(), 429 | 503);
             if retryable && attempt < MAX_RETRIES {
-                let backoff_secs = 1u64 << attempt.min(4);
+                let sleep_dur = retry_delay_from_headers(resp.headers())
+                    .unwrap_or_else(|| Duration::from_secs(1u64 << attempt.min(4)));
+                let wait_secs = sleep_dur.as_secs().max(1);
                 emit_status(
                     sink,
                     &request.tab_id,
@@ -234,12 +283,11 @@ async fn stream_chat_completions_response_once(
                         "Received {} from {}, retrying in {}s (attempt {}/{})...",
                         status.as_u16(),
                         provider_display_name(&config.provider),
-                        backoff_secs,
+                        wait_secs,
                         attempt + 1,
                         MAX_RETRIES
                     ),
                 );
-                let sleep_dur = Duration::from_secs(backoff_secs);
                 if let Some(rx) = cancel_rx.as_mut() {
                     tokio::select! {
                         _ = tokio::time::sleep(sleep_dur) => {}
@@ -490,7 +538,8 @@ pub async fn run_turn_loop(
         );
     }
     let mut next_messages = transcript_to_chat_messages(&instructions, request, history);
-    compact_chat_messages(&mut next_messages);
+    ensure_tool_result_pairing(&mut next_messages);
+    preflight_compact_messages(sink, &request.tab_id, &runtime.model, &mut next_messages)?;
     let turn_started_at = Instant::now();
     let mut doc_tool_rounds = 0u32;
     let mut doc_tool_calls = 0u32;
@@ -509,6 +558,7 @@ pub async fn run_turn_loop(
     let mut tracker = ToolCallTracker::new(budget.max_rounds);
 
     for round_idx in 0..budget.max_rounds {
+        preflight_compact_messages(sink, &request.tab_id, &runtime.model, &mut next_messages)?;
         tracker.current_round = round_idx;
         budget.ensure_round_available(round_idx)?;
         let outcome = stream_chat_completions_response_once(
@@ -651,7 +701,8 @@ pub async fn run_turn_loop(
         }
 
         next_messages.extend(tool_results_messages);
-        compact_chat_messages(&mut next_messages);
+        ensure_tool_result_pairing(&mut next_messages);
+        preflight_compact_messages(sink, &request.tab_id, &runtime.model, &mut next_messages)?;
 
         if let Some(injection) = tracker.build_injection(round_idx) {
             next_messages.push(json!({

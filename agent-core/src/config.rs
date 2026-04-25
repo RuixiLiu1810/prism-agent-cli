@@ -1,5 +1,23 @@
 use std::path::PathBuf;
 
+pub const AUTOCOMPACT_BUFFER_TOKENS: u32 = 8_000;
+pub const MAX_CONSECUTIVE_COMPACT_FAILURES: u32 = 3;
+
+pub fn context_window_for_model(model: &str) -> u32 {
+    let m = model.trim().to_ascii_lowercase();
+    if m.contains("gpt-5") {
+        200_000
+    } else {
+        128_000
+    }
+}
+
+pub fn autocompact_threshold_for_model(model: &str) -> u32 {
+    let window = context_window_for_model(model);
+    let threshold = window.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS);
+    threshold.max(8_000)
+}
+
 // ── Config data types (mirror of settings/types.rs, now public) ─────
 
 #[derive(Debug, Clone)]
@@ -58,6 +76,7 @@ pub trait ConfigProvider: Send + Sync {
 // ── Static implementation (for tests / CLI with pre-loaded config) ──
 
 /// A config provider that returns a fixed `AgentRuntimeConfig`.
+#[derive(Clone)]
 pub struct StaticConfigProvider {
     pub config: AgentRuntimeConfig,
     pub config_dir: PathBuf,
@@ -153,5 +172,19 @@ mod tests {
         assert!(cfg.sampling_profiles.edit_stable.temperature < 0.5);
         assert!(cfg.sampling_profiles.chat_flexible.temperature > 0.5);
         assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn context_window_mapping_has_reasonable_defaults() {
+        assert_eq!(context_window_for_model("gpt-5.4"), 200_000);
+        assert_eq!(context_window_for_model("MiniMax-M1"), 128_000);
+        assert_eq!(context_window_for_model("deepseek-chat"), 128_000);
+    }
+
+    #[test]
+    fn autocompact_threshold_uses_buffer() {
+        let threshold = autocompact_threshold_for_model("gpt-5.4");
+        assert_eq!(threshold, 192_000);
+        assert!(threshold < context_window_for_model("gpt-5.4"));
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-use super::AgentTurnOutcome;
+use super::{retry_delay_from_headers, AgentTurnOutcome};
 use crate::tools::is_document_tool_name;
 use crate::{
     build_agent_instructions_with_work_state, default_tool_specs, emit_error, emit_status,
@@ -173,7 +173,9 @@ async fn stream_response_once(
             let status = resp.status();
             let retryable = matches!(status.as_u16(), 429 | 503);
             if retryable && attempt < MAX_RETRIES {
-                let backoff_secs = 1u64 << attempt.min(4);
+                let sleep_dur = retry_delay_from_headers(resp.headers())
+                    .unwrap_or_else(|| Duration::from_secs(1u64 << attempt.min(4)));
+                let wait_secs = sleep_dur.as_secs().max(1);
                 emit_status(
                     sink,
                     &request.tab_id,
@@ -181,12 +183,11 @@ async fn stream_response_once(
                     &format!(
                         "Received {} from OpenAI, retrying in {}s (attempt {}/{})...",
                         status.as_u16(),
-                        backoff_secs,
+                        wait_secs,
                         attempt + 1,
                         MAX_RETRIES
                     ),
                 );
-                let sleep_dur = Duration::from_secs(backoff_secs);
                 if let Some(rx) = cancel_rx.as_mut() {
                     tokio::select! {
                         _ = tokio::time::sleep(sleep_dur) => {}
