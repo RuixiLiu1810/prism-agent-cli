@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use crate::provider::AgentTurnProfile;
 use crate::workflows::AgentWorkflowState;
+use crate::{
+    CallSpanStatus, CallSpanType, CallTrace,
+};
 
 const PENDING_TURN_TTL_MINUTES: i64 = 10;
 const ALLOW_ONCE_TTL_MINUTES: i64 = 15;
@@ -24,6 +27,7 @@ const MEMORY_DIR: &str = "memory";
 const MEMORY_INDEX_FILE: &str = "index.json";
 const MEMORY_MAX_ENTRIES: usize = 50;
 const MEMORY_INJECTION_TOKEN_BUDGET: usize = 2000;
+const CALLTRACE_RETENTION_PER_TAB: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +281,8 @@ pub struct AgentRuntimeState {
     pub session_work_states: Arc<Mutex<HashMap<String, AgentSessionWorkState>>>,
     pub workflows: Arc<Mutex<HashMap<String, AgentWorkflowState>>>,
     pub memory_index: Arc<Mutex<MemoryIndex>>,
+    pub call_traces: Arc<Mutex<HashMap<String, Vec<CallTrace>>>>,
+    pub active_trace_by_tab: Arc<Mutex<HashMap<String, String>>>,
     pub active_turns: Arc<Mutex<HashSet<String>>>,
     persistence_dir: Arc<Mutex<Option<PathBuf>>>,
     persistence_loaded: Arc<Mutex<bool>>,
@@ -295,6 +301,8 @@ impl Default for AgentRuntimeState {
             session_work_states: Arc::new(Mutex::new(HashMap::new())),
             workflows: Arc::new(Mutex::new(HashMap::new())),
             memory_index: Arc::new(Mutex::new(MemoryIndex::default())),
+            call_traces: Arc::new(Mutex::new(HashMap::new())),
+            active_trace_by_tab: Arc::new(Mutex::new(HashMap::new())),
             active_turns: Arc::new(Mutex::new(HashSet::new())),
             persistence_dir: Arc::new(Mutex::new(None)),
             persistence_loaded: Arc::new(Mutex::new(false)),
@@ -1042,6 +1050,163 @@ impl AgentRuntimeState {
         self.clear_pending_state(tab_id, local_session_id).await;
     }
 
+    pub async fn ensure_call_trace(
+        &self,
+        tab_id: &str,
+        local_session_id: Option<&str>,
+        project_path: &str,
+        provider: &str,
+        model: &str,
+    ) -> String {
+        {
+            let active = self.active_trace_by_tab.lock().await;
+            if let Some(trace_id) = active.get(tab_id) {
+                return trace_id.clone();
+            }
+        }
+
+        let mut trace = CallTrace::new(tab_id, local_session_id, project_path, provider, model);
+        trace.recompute_stats();
+        let trace_id = trace.trace_id.clone();
+
+        {
+            let mut traces = self.call_traces.lock().await;
+            let entry = traces.entry(tab_id.to_string()).or_default();
+            entry.push(trace);
+            while entry.len() > CALLTRACE_RETENTION_PER_TAB {
+                entry.remove(0);
+            }
+        }
+        {
+            let mut active = self.active_trace_by_tab.lock().await;
+            active.insert(tab_id.to_string(), trace_id.clone());
+        }
+        trace_id
+    }
+
+    pub async fn trace_start_span(
+        &self,
+        tab_id: &str,
+        span_type: CallSpanType,
+        name: &str,
+        parent_span_id: Option<String>,
+        attrs: Value,
+    ) -> Option<String> {
+        let trace_id = {
+            let active = self.active_trace_by_tab.lock().await;
+            active.get(tab_id).cloned()
+        }?;
+
+        let mut traces = self.call_traces.lock().await;
+        let trace = traces
+            .get_mut(tab_id)?
+            .iter_mut()
+            .rev()
+            .find(|trace| trace.trace_id == trace_id)?;
+        Some(trace.start_span(span_type, name.to_string(), parent_span_id, attrs))
+    }
+
+    pub async fn trace_add_event(
+        &self,
+        tab_id: &str,
+        span_id: &str,
+        name: &str,
+        payload: Value,
+    ) -> bool {
+        let trace_id = {
+            let active = self.active_trace_by_tab.lock().await;
+            active.get(tab_id).cloned()
+        };
+        let Some(trace_id) = trace_id else {
+            return false;
+        };
+
+        let mut traces = self.call_traces.lock().await;
+        let Some(trace) = traces
+            .get_mut(tab_id)
+            .and_then(|list| list.iter_mut().rev().find(|trace| trace.trace_id == trace_id))
+        else {
+            return false;
+        };
+        trace.add_event(span_id, name, payload)
+    }
+
+    pub async fn trace_close_span(
+        &self,
+        tab_id: &str,
+        span_id: &str,
+        status: CallSpanStatus,
+        attrs: Option<Value>,
+    ) -> bool {
+        let trace_id = {
+            let active = self.active_trace_by_tab.lock().await;
+            active.get(tab_id).cloned()
+        };
+        let Some(trace_id) = trace_id else {
+            return false;
+        };
+
+        let mut traces = self.call_traces.lock().await;
+        let Some(trace) = traces
+            .get_mut(tab_id)
+            .and_then(|list| list.iter_mut().rev().find(|trace| trace.trace_id == trace_id))
+        else {
+            return false;
+        };
+        trace.close_span(span_id, status, attrs)
+    }
+
+    pub async fn trace_record_error(&self, tab_id: &str, code: &str, message: &str) {
+        if let Some(span_id) = self
+            .trace_start_span(
+                tab_id,
+                CallSpanType::Error,
+                "error",
+                None,
+                serde_json::json!({ "code": code, "message": message }),
+            )
+            .await
+        {
+            let _ = self
+                .trace_close_span(tab_id, &span_id, CallSpanStatus::Error, None)
+                .await;
+        }
+    }
+
+    pub async fn finalize_call_trace(&self, tab_id: &str, outcome: &str) -> Option<String> {
+        let trace_id = {
+            let mut active = self.active_trace_by_tab.lock().await;
+            active.remove(tab_id)
+        }?;
+
+        let mut traces = self.call_traces.lock().await;
+        let trace = traces
+            .get_mut(tab_id)?
+            .iter_mut()
+            .rev()
+            .find(|trace| trace.trace_id == trace_id)?;
+        trace.finalize(outcome);
+        Some(trace_id)
+    }
+
+    pub async fn latest_call_trace_for_tab(&self, tab_id: &str) -> Option<CallTrace> {
+        let mut traces = self.call_traces.lock().await;
+        let trace = traces.get_mut(tab_id)?.last_mut()?;
+        trace.recompute_stats();
+        Some(trace.clone())
+    }
+
+    pub async fn clear_call_traces_for_tab(&self, tab_id: &str) {
+        {
+            let mut traces = self.call_traces.lock().await;
+            traces.remove(tab_id);
+        }
+        {
+            let mut active = self.active_trace_by_tab.lock().await;
+            active.remove(tab_id);
+        }
+    }
+
     pub async fn upsert_workflow_state(&self, workflow: AgentWorkflowState) {
         let workflow_type = workflow.workflow_type.as_str().to_string();
         let current_stage = workflow.current_stage.clone();
@@ -1750,6 +1915,7 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AgentRuntimeState, AgentSessionRecord, PendingTurnResume};
+    use crate::{CallSpanStatus, CallSpanType};
     use crate::workflows::AgentWorkflowState;
     use serde_json::json;
 
@@ -2060,6 +2226,53 @@ mod tests {
             .check_tool_approval("tab-a", "run_shell_command")
             .await;
         assert_eq!(check.allow_once_remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn trace_snapshot_is_non_consuming() {
+        let state = AgentRuntimeState::default();
+        let trace_id = state
+            .ensure_call_trace("tab-a", Some("session-a"), "/tmp/project-a", "minimax", "M2.7")
+            .await;
+        let turn_span = state
+            .trace_start_span(
+                "tab-a",
+                CallSpanType::Turn,
+                "turn",
+                None,
+                json!({ "round": 1 }),
+            )
+            .await
+            .expect("turn span");
+        let _ = state
+            .trace_close_span("tab-a", &turn_span, CallSpanStatus::Ok, None)
+            .await;
+
+        let snapshot = state.latest_call_trace_for_tab("tab-a").await;
+        assert!(snapshot.is_some());
+        assert_eq!(snapshot.unwrap().trace_id, trace_id);
+        assert!(state.latest_call_trace_for_tab("tab-a").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn trace_store_obeys_retention_limit() {
+        let state = AgentRuntimeState::default();
+        for idx in 0..10 {
+            let _ = state
+                .ensure_call_trace(
+                    "tab-a",
+                    Some("session-a"),
+                    &format!("/tmp/project-{idx}"),
+                    "minimax",
+                    "M2.7",
+                )
+                .await;
+            let _ = state.finalize_call_trace("tab-a", "completed").await;
+        }
+
+        let traces = state.call_traces.lock().await;
+        let retained = traces.get("tab-a").map(|items| items.len()).unwrap_or(0);
+        assert_eq!(retained, 8);
     }
 
     #[tokio::test]

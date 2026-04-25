@@ -1,6 +1,7 @@
 // Agent core library — framework-agnostic agent runtime.
 
 pub mod config;
+pub mod callchain;
 pub mod document_artifacts;
 pub mod event_sink;
 pub mod events;
@@ -20,6 +21,10 @@ pub use config::{
     autocompact_threshold_for_model, context_window_for_model, AgentDomainConfig,
     AgentRuntimeConfig, AgentSamplingConfig, AgentSamplingProfilesConfig, ConfigProvider,
     StaticConfigProvider, AUTOCOMPACT_BUFFER_TOKENS, MAX_CONSECUTIVE_COMPACT_FAILURES,
+};
+pub use callchain::{
+    CallSpan, CallSpanEvent, CallSpanStatus, CallSpanType, CallTrace, CallTraceStats,
+    CALLCHAIN_SCHEMA_VERSION,
 };
 pub use document_artifacts::{
     artifact_path_for, find_relevant_document_matches, format_document_matches_preview,
