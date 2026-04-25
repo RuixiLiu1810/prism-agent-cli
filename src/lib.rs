@@ -4,6 +4,7 @@ pub mod output;
 pub mod protocol;
 pub mod providers;
 pub mod runtime;
+pub mod services;
 pub mod state;
 pub mod tools;
 pub mod ui;
