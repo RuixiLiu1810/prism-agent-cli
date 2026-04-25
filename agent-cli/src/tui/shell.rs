@@ -16,6 +16,7 @@ use crate::config_model::ResolvedConfig;
 use crate::permissions;
 use crate::repl;
 use crate::status_snapshot::CliStatusSnapshot;
+use crate::trace_commands;
 use crate::tui::icons::{reduced_motion_enabled, Icons};
 use crate::tui::layout::{render_header_block, render_notice_line, render_slots, Slot, SlotLine};
 use crate::tui::suggestions::render_command_suggestions;
@@ -487,13 +488,13 @@ fn static_provider_for(resolved: &ResolvedConfig) -> StaticConfigProvider {
 
 fn render_help_panel() {
     println!(
-        "TUI (streaming) commands:\n  /help\n  /commands\n  /status\n  /permissions [show|clear|shell once|shell session|shell deny]\n  /approve shell once|session|deny (alias)\n  exit|quit"
+        "TUI (streaming) commands:\n  /help\n  /commands\n  /status\n  /permissions [show|clear|shell once|shell session|shell deny]\n  /approve shell once|session|deny (alias)\n  /trace [show|export [path]|clear]\n  exit|quit"
     );
 }
 
 fn render_commands_panel() {
     println!(
-        "Supported commands:\n  /help\n  /commands\n  /status\n  /permissions\n  /permissions shell once|session|deny\n  /approve shell once|session|deny (alias)"
+        "Supported commands:\n  /help\n  /commands\n  /status\n  /permissions\n  /permissions shell once|session|deny\n  /approve shell once|session|deny (alias)\n  /trace\n  /trace export [path]\n  /trace clear"
     );
 }
 
@@ -676,6 +677,30 @@ pub async fn run_tui_shell(
                             } else {
                                 streaming_sink.set_status(UiSessionStatus::Idle);
                             }
+                        }
+                        Err(err) => eprintln!("agent-runtime error: {}", err),
+                    }
+                    Ok(())
+                });
+            }
+            ReplCommand::Trace(command) => {
+                repl_streaming_sink_for_submit.prepare_transcript_output();
+                let runtime_state = Arc::clone(&repl_runtime_state);
+                let tab_id = repl_args.tab_id.clone();
+                let project_path = repl_args.project_path.clone();
+                let streaming_sink = Arc::clone(&repl_streaming_sink_for_submit);
+                return Box::pin(async move {
+                    match trace_commands::execute_trace_command(
+                        runtime_state.as_ref(),
+                        &tab_id,
+                        &project_path,
+                        command,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            streaming_sink.set_status(UiSessionStatus::Idle);
+                            println!("{}", message);
                         }
                         Err(err) => eprintln!("agent-runtime error: {}", err),
                     }

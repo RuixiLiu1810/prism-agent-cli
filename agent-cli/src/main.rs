@@ -12,6 +12,7 @@ mod permissions;
 mod repl;
 mod status_snapshot;
 mod tool_executor;
+mod trace_commands;
 mod tui;
 mod turn_runner;
 
@@ -144,6 +145,8 @@ fn render_help_panel() {
             Manage runtime tool approval policy
   /approve shell once|session|deny
             Compatibility alias for /permissions shell ...
+  /trace [show|export [path]|clear]
+            Show/export/clear callchain trace
   /status    Show current runtime status
   /clear     Clear the screen and redraw header
   exit|quit  Leave REPL"
@@ -161,6 +164,9 @@ fn render_commands_panel() {
   /permissions
   /permissions shell once|session|deny
   /approve shell once|session|deny (alias)
+  /trace
+  /trace export [path]
+  /trace clear
   /status
   /clear"
     );
@@ -734,6 +740,25 @@ async fn main() -> ExitCode {
                                         }
                                     }
                                 }
+                                Err(err) => eprintln!("agent-runtime error: {}", err),
+                            }
+                            Ok(())
+                        });
+                    }
+                    command_router::ReplCommand::Trace(command) => {
+                        let runtime_state = Arc::clone(&repl_runtime_state);
+                        let tab_id = repl_args.tab_id.clone();
+                        let project_path = repl_args.project_path.clone();
+                        return Box::pin(async move {
+                            match trace_commands::execute_trace_command(
+                                runtime_state.as_ref(),
+                                &tab_id,
+                                &project_path,
+                                command,
+                            )
+                            .await
+                            {
+                                Ok(message) => println!("{}", message),
                                 Err(err) => eprintln!("agent-runtime error: {}", err),
                             }
                             Ok(())

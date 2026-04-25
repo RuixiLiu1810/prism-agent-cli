@@ -4,6 +4,7 @@ pub(crate) const KNOWN_COMMANDS: &[&str] = &[
     "/config",
     "/model",
     "/permissions",
+    "/trace",
     "/status",
     "/clear",
     "/approve",
@@ -19,6 +20,13 @@ pub enum PermissionCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceCommand {
+    Show,
+    Export(Option<String>),
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplCommand {
     Help,
     Commands,
@@ -28,6 +36,7 @@ pub enum ReplCommand {
     ModelShow,
     ModelSet(String),
     Permissions(PermissionCommand),
+    Trace(TraceCommand),
     Unknown {
         raw: String,
         suggestion: Option<&'static str>,
@@ -59,6 +68,7 @@ pub fn parse_repl_command(input: &str) -> ReplCommand {
             }
         }
         "/permissions" => parse_permissions_command(&mut parts, trimmed),
+        "/trace" => parse_trace_command(&mut parts, trimmed),
         "/approve" => {
             let target = parts.next().unwrap_or_default();
             let mode = parts.next().unwrap_or_default();
@@ -75,6 +85,25 @@ pub fn parse_repl_command(input: &str) -> ReplCommand {
         other => ReplCommand::Unknown {
             raw: other.to_string(),
             suggestion: suggest_command(other),
+        },
+    }
+}
+
+fn parse_trace_command<'a>(parts: &mut impl Iterator<Item = &'a str>, raw: &str) -> ReplCommand {
+    match parts.next() {
+        None | Some("show") => ReplCommand::Trace(TraceCommand::Show),
+        Some("clear") => ReplCommand::Trace(TraceCommand::Clear),
+        Some("export") => {
+            let path = parts.collect::<Vec<_>>().join(" ");
+            if path.trim().is_empty() {
+                ReplCommand::Trace(TraceCommand::Export(None))
+            } else {
+                ReplCommand::Trace(TraceCommand::Export(Some(path.trim().to_string())))
+            }
+        }
+        _ => ReplCommand::Unknown {
+            raw: raw.to_string(),
+            suggestion: Some("/trace show"),
         },
     }
 }
@@ -200,7 +229,7 @@ fn levenshtein(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_repl_command, PermissionCommand, ReplCommand};
+    use super::{parse_repl_command, PermissionCommand, ReplCommand, TraceCommand};
 
     #[test]
     fn parses_supported_commands() {
@@ -253,6 +282,27 @@ mod tests {
         assert_eq!(
             parse_repl_command("/permissions shell session"),
             ReplCommand::Permissions(PermissionCommand::ShellSession)
+        );
+    }
+
+    #[test]
+    fn parses_trace_commands() {
+        assert_eq!(parse_repl_command("/trace"), ReplCommand::Trace(TraceCommand::Show));
+        assert_eq!(
+            parse_repl_command("/trace show"),
+            ReplCommand::Trace(TraceCommand::Show)
+        );
+        assert_eq!(
+            parse_repl_command("/trace clear"),
+            ReplCommand::Trace(TraceCommand::Clear)
+        );
+        assert_eq!(
+            parse_repl_command("/trace export"),
+            ReplCommand::Trace(TraceCommand::Export(None))
+        );
+        assert_eq!(
+            parse_repl_command("/trace export /tmp/a.json"),
+            ReplCommand::Trace(TraceCommand::Export(Some("/tmp/a.json".to_string())))
         );
     }
 

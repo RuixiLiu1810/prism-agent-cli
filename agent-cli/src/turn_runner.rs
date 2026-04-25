@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use agent_core::{
-    emit_turn_resumed, providers, AgentRuntimeState, AgentTurnDescriptor, EventSink,
-    PendingTurnResume, StaticConfigProvider, ToolExecutorFn,
+    emit_turn_resumed, providers, AgentRuntimeState, AgentTurnDescriptor, CallSpanStatus,
+    CallSpanType, EventSink, PendingTurnResume, StaticConfigProvider, ToolExecutorFn,
 };
+use serde_json::json;
 
 pub fn is_chat_completions_provider(provider: &str) -> bool {
     matches!(provider, "minimax" | "deepseek")
@@ -22,7 +23,54 @@ pub async fn run_turn(
     tool_executor: ToolExecutorFn,
 ) -> Result<providers::AgentTurnOutcome, String> {
     let provider = config_provider.config.provider.trim().to_ascii_lowercase();
+    let model = request
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config_provider.config.model.clone());
+    let _trace_id = runtime_state
+        .ensure_call_trace(
+            &request.tab_id,
+            request.local_session_id.as_deref(),
+            &request.project_path,
+            &provider,
+            &model,
+        )
+        .await;
+    let turn_span_id = runtime_state
+        .trace_start_span(
+            &request.tab_id,
+            CallSpanType::Turn,
+            "turn",
+            None,
+            json!({
+                "provider": provider,
+                "model": model,
+                "tab_id": request.tab_id,
+                "session_id": request.local_session_id,
+            }),
+        )
+        .await;
+
     if !is_chat_completions_provider(&provider) {
+        if let Some(span_id) = turn_span_id {
+            let _ = runtime_state
+                .trace_close_span(
+                    &request.tab_id,
+                    &span_id,
+                    CallSpanStatus::Error,
+                    Some(json!({"error": "unsupported_provider"})),
+                )
+                .await;
+        }
+        runtime_state
+            .trace_record_error(
+                &request.tab_id,
+                "unsupported_provider",
+                "Provider is not enabled for MVP-1 REPL",
+            )
+            .await;
+        let _ = runtime_state.finalize_call_trace(&request.tab_id, "error").await;
         return Err(format!(
             "Provider '{}' is not enabled for MVP-1 REPL. Use minimax or deepseek.",
             provider
@@ -38,7 +86,7 @@ pub async fn run_turn(
         Vec::new()
     };
 
-    let outcome = providers::chat_completions::run_turn_loop(
+    let result = providers::chat_completions::run_turn_loop(
         sink,
         config_provider,
         runtime_state,
@@ -47,7 +95,66 @@ pub async fn run_turn(
         Arc::clone(&tool_executor),
         None,
     )
-    .await?;
+    .await;
+
+    match &result {
+        Ok(outcome) if outcome.suspended => {
+            if let Some(span_id) = turn_span_id.clone() {
+                let _ = runtime_state
+                    .trace_close_span(
+                        &request.tab_id,
+                        &span_id,
+                        CallSpanStatus::Interrupted,
+                        Some(json!({ "outcome": "suspended" })),
+                    )
+                    .await;
+            }
+        }
+        Ok(_) => {
+            if let Some(span_id) = turn_span_id.clone() {
+                let _ = runtime_state
+                    .trace_close_span(
+                        &request.tab_id,
+                        &span_id,
+                        CallSpanStatus::Ok,
+                        Some(json!({ "outcome": "completed" })),
+                    )
+                    .await;
+            }
+            let _ = runtime_state
+                .finalize_call_trace(&request.tab_id, "completed")
+                .await;
+        }
+        Err(err) => {
+            let span_status = if err == agent_core::AGENT_CANCELLED_MESSAGE {
+                CallSpanStatus::Cancelled
+            } else {
+                CallSpanStatus::Error
+            };
+            if let Some(span_id) = turn_span_id {
+                let _ = runtime_state
+                    .trace_close_span(
+                        &request.tab_id,
+                        &span_id,
+                        span_status,
+                        Some(json!({ "error": err })),
+                    )
+                    .await;
+            }
+            runtime_state
+                .trace_record_error(&request.tab_id, "turn_error", err)
+                .await;
+            let final_outcome = if err == agent_core::AGENT_CANCELLED_MESSAGE {
+                "cancelled"
+            } else {
+                "error"
+            };
+            let _ = runtime_state
+                .finalize_call_trace(&request.tab_id, final_outcome)
+                .await;
+        }
+    }
+    let outcome = result?;
 
     if let Some(local_session_id) = request.local_session_id.as_deref() {
         runtime_state
@@ -85,6 +192,28 @@ pub async fn resume_pending_turn(
             pending.approval_tool_name
         ),
     );
+    if let Some(span_id) = runtime_state
+        .trace_start_span(
+            &pending.tab_id,
+            CallSpanType::TurnResume,
+            "turn_resume",
+            None,
+            json!({
+                "approval_tool_name": pending.approval_tool_name,
+                "local_session_id": local_session_id,
+            }),
+        )
+        .await
+    {
+        let _ = runtime_state
+            .trace_close_span(
+                &pending.tab_id,
+                &span_id,
+                CallSpanStatus::Ok,
+                Some(json!({ "message": "resumed" })),
+            )
+            .await;
+    }
 
     let request = AgentTurnDescriptor {
         project_path: pending.project_path,
